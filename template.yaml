@@ -1,0 +1,492 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  SenderEmail:
+    Type: String
+    Description: Verified SES sender email address
+  AlertEmail:
+    Type: String
+    Description: Email to receive error alerts
+  UseDomainIdentity:
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    Description: Set to true if using a custom domain for sending emails
+  DomainName:
+    Type: String
+    Default: ""
+    Description: (Optional) Custom domain for sending emails (e.g., newsletter.yourdomain.com)
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: (Optional) Route 53 Hosted Zone ID for the domain
+  ApiGatewayId:
+    Default: ""
+    Type: String
+    Description: API Gateway ID for constructing URLs. Avoids circular dependency with API Gateway and Lambdas
+  SubLandingPage:
+    Type: String
+    Default: ""
+    Description: URL for subscription landing page
+
+Conditions:
+  CreateDomainIdentity: !Equals 
+    - !Ref UseDomainIdentity
+    - true
+  HasHostedZone: !And
+    - !Not [!Equals [!Ref HostedZoneId, ""]]
+    - !Condition CreateDomainIdentity
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        SUBSCRIBERS_TABLE: !Ref SubscribersTable
+        EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
+        AWS_ACCOUNT_ID: !Ref AWS::AccountId
+        Stage: !Ref Stage
+        SENDER_EMAIL: !Ref SenderEmail
+        API_URL: !Sub "https://${ApiGatewayId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+        SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
+    Tags:
+      Environment: !Ref Stage
+      Service: ai-research-newsletter
+
+  Api:
+    Cors:
+      AllowMethods: "'*'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
+      MaxAge: "'600'"
+      AllowCredentials: false
+
+Resources:
+  # Define the API Gateway first
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      EndpointConfiguration: REGIONAL
+      Auth:
+        DefaultAuthorizer: NONE
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          LoggingLevel: INFO
+
+  # Define DynamoDB table before functions that depend on it
+  SubscribersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-subscribers"
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # SES Configuration Set
+  EmailConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Sub "${AWS::StackName}-config-set"
+      DeliveryOptions:
+        TlsPolicy: REQUIRE
+      ReputationOptions:
+        ReputationMetricsEnabled: true
+      TrackingOptions:
+        CustomRedirectDomain: !Ref DomainName
+
+  # Lambda Functions
+  NewsletterFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+      - EmailConfigurationSet
+    Properties:
+      CodeUri: .
+      Handler: functions.newsletter_generator.lambda_handler
+      Description: "Generates and sends AI paper newsletter"
+      Timeout: 900
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          ANTHROPIC_API_KEY: !Sub "{{resolve:secretsmanager:anthropic/api_key}}"
+          EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
+          LOG_LEVEL: INFO
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: 
+                - "secretsmanager:GetSecretValue"
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:anthropic/api_key-*"
+            - Effect: Allow
+              Action:
+                - ses:SendRawEmail
+                - ses:CreateTemplate
+                - ses:UpdateTemplate
+                - ses:DeleteTemplate
+                - ses:GetTemplate
+                - ses:SendBulkTemplatedEmail
+                - ses:SendEmail
+                - ses:SendTemplatedEmail
+              Resource: "*"
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 12 ? * MON,FRI *)
+            Name: !Sub "${AWS::StackName}-newsletter-schedule-event"
+            Description: "Newsletter generation schedule event"
+            Enabled: true
+
+  SubscribeFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.add_subscriber
+      Environment:
+        Variables:
+          API_DOMAIN: !Sub "${AWS::Region}-${AWS::AccountId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendTemplatedEmail
+              Resource: "*"
+      Events:
+        SubscribePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /subscribe
+            Method: POST
+        SubscribeOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /subscribe
+            Method: OPTIONS
+
+  VerifyFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.verify_subscriber
+      Environment:
+        Variables:
+          SUBSCRIBERS_TABLE: !Ref SubscribersTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendTemplatedEmail
+                - ses:SendEmail
+                - ses:GetTemplate
+              Resource: "*"
+      Events:
+        VerifyGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /verify
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        VerifyOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /verify
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+
+  UnsubscribeFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.unsubscribe_handler
+      Environment:
+        Variables:
+          SUBSCRIBERS_TABLE: !Ref SubscribersTable
+          SENDER_EMAIL: !Ref SenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscribersTable
+      Events:
+        UnsubscribeGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /unsubscribe
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        UnsubscribeOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /unsubscribe
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+
+  # Monitoring Resources
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName} Alarms"
+
+  AlarmTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  NewsletterFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: NewsletterFunction
+    Properties:
+      AlarmDescription: !Sub "Alert when ${NewsletterFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NewsletterFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  # SES Resources
+
+  EmailIdentity: # Single email identify verification
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SenderEmail
+      ConfigurationSetAttributes:
+        ConfigurationSetName: !Ref EmailConfigurationSet
+      DkimAttributes:
+        SigningEnabled: true
+
+  SESDomain:
+    Type: AWS::SES::EmailIdentity
+    Condition: CreateDomainIdentity
+    Properties:
+      EmailIdentity: !Ref DomainName
+      ConfigurationSetAttributes:
+        ConfigurationSetName: !Ref EmailConfigurationSet
+      DkimSigningAttributes:
+        NextSigningKeyLength: RSA_2048_BIT
+
+  # Domain verification and SPF records only
+  SESDomainVerificationRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: HasHostedZone 
+    DependsOn: SESDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Sub "${DomainName}."
+          Type: TXT
+          TTL: 60
+          ResourceRecords:
+            - '"v=spf1 include:amazonses.com ~all"'
+        - Name: !Sub "_dmarc.${DomainName}."
+          Type: TXT
+          TTL: 60
+          ResourceRecords:
+            - !Sub '"v=DMARC1; p=none; pct=20; rua=mailto:dmarc-reports@${DomainName}; aspf=s; adkim=s;"'
+
+  UnsubscribeTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: UnsubscribeTemplate
+        SubjectPart: "Unsubscribed from AI Paper Newsletter"
+        HtmlPart: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Unsubscribed from AI Papers Newsletter</title>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
+                  .container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                  .success-icon { color: #28a745; font-size: 48px; margin-bottom: 20px; }
+                  .message { color: #666; margin-bottom: 20px; }
+                  .resubscribe { margin-top: 20px; font-size: 0.9em; color: #666; }
+                  .resubscribe a { color: #007bff; text-decoration: none; }
+                  .resubscribe a:hover { text-decoration: underline; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="success-icon">✓</div>
+                  <h1>Unsubscribed</h1>
+                  <p class="message">You've been successfully unsubscribed from the AI Paper Newsletter.</p>
+                  <p>Email: {{email}}</p>
+              </div>
+          </body>
+          </html>
+        TextPart: |
+          You've been successfully unsubscribed from the AI Paper Newsletter.
+          
+          Email: {{email}}
+
+  VerificationTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: VerificationTemplate
+        SubjectPart: "Verify your AI Papers Newsletter subscription"
+        HtmlPart: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>Welcome to the AI Paper Newsletter!</title>
+            <p>Please click the link below to verify your subscription:</p>
+            <p><a href="{{verification_url}}">Verify Email Address</a></p>
+            <p>Or copy and paste this URL: {{verification_url}}</p>
+          </head>
+          </html>
+        TextPart: |
+          Welcome to the AI Papers Newsletter!
+          Please click this link to verify your subscription: {{verification_url}}
+
+  WelcomeTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: WelcomeTemplate
+        SubjectPart: "Welcome to AI Papers Newsletter"
+        HtmlPart: |
+          <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <h2>Welcome to the AI Papers Newsletter!</h2>
+              <p>Your subscription has been confirmed.</p>
+              <p>You'll start receiving our curated AI research updates soon. We currently send them every Monday and Friday </p>
+            </head>
+            </html>
+        TextPart: |
+            Welcome to the AI Papers Newsletter!
+            Your subscription has been confirmed.
+            You'll start receiving our curated AI research updates soon. We currently send them every Monday and Friday
+
+  NewsletterDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-metrics"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/SES", "Send", "EmailType", "newsletter" ],
+                  [ ".", "Delivery", ".", "." ],
+                  [ ".", "Bounce", ".", "." ],
+                  [ ".", "Complaint", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Email Delivery Metrics"
+              }
+            }
+          ]
+        }
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}"
+      RetentionInDays: 30
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  SubscribeEndpoint:
+    Description: Subscribe endpoint URL
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/subscribe"
+  NewsletterFunctionArn:
+    Description: Newsletter Lambda Function ARN
+    Value: !GetAtt NewsletterFunction.Arn
+  SubscribersTableName:
+    Description: Name of DynamoDB table storing subscribers
+    Value: !Ref SubscribersTable
+  AlarmTopicARN:
+    Description: SNS Topic ARN for CloudWatch Alarms
+    Value: !Ref AlarmTopic
+  Stage:
+    Description: Deployment stage
+    Value: !Ref Stage
+  ConfigurationSetName:
+    Description: SES Configuration Set Name
+    Value: !Ref EmailConfigurationSet
+  StatusIndexName:
+    Description: DynamoDB GSI for subscriber status
+    Value: StatusIndex
+  DomainVerificationStatus:
+    Condition: CreateDomainIdentity
+    Description: SES Domain Status
+    Value: !Ref SESDomain

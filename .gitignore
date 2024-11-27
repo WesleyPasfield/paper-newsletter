@@ -1,0 +1,18 @@
+# .gitignore
+.env
+.env.*
+samconfig.toml
+.aws/
+*.pem
+*.key
+__pycache__/
+*.pyc
+.DS_Store
+build/
+.aws-sam/
+*.crt
+*.cert
+*.p12
+.vscode/
+.idea/
+*.swp
