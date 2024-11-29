@@ -617,7 +617,7 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
 <body class="dark-bg">
     <!-- Preview Text -->
     <div style="display: none; max-height: 0px; overflow: hidden;">
-        Your weekly AI research digest - {{featured_count}} new papers on practical AI implementation and regulation
+        Your weekly AI papers digest - {{featured_count}} new papers on practical AI implementation and regulation
         &nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
     </div>
 

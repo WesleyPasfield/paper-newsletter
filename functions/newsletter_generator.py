@@ -16,7 +16,7 @@ logger.setLevel(logging.INFO)
 EVAL_PROMPT = """You are evaluating academic papers for an expert specializing in:
 
 1. Practical LLM/Generative AI regulation:
-- Data-driven evaluation frameworks over compute metrics
+- Data-driven evaluation frameworks over compute based metrics
 - Domain-specific testing methodologies
 - Production deployment challenges
 - User experience validation
@@ -35,12 +35,30 @@ EVAL_PROMPT = """You are evaluating academic papers for an expert specializing i
 - Converting research demos to production applications
 - Real-world deployment architectures
 
+Here are some example paper titles that I have found interesting lately for additional context:
+
+- On the Limitations of Compute Thresholds as a Governance Strategy for Large Language Models
+- Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena
+- Evaluating Synthetic Data for Tool-Using LLMs
+- Towards Monosemanticity: Decomposing Language Models With Dictionary Learning
+- Judging the Judges: Evaluating Alignment and Vulnerabilities in LLMs-as-Judges
+- LalaEval: A Holistic Human Evaluation Framework for Domain-Specific Large Language Models
+- Large Language Model Influence on Diagnostic ReasoningA Randomized Clinical Trial
+- InsightBench: Evaluating Business Analytics Agents Through Multi-Step Insight Generation
+- Best Practices and Lessons Learned on Synthetic Data for Language Models
+- The Social Impact of Generative LLM-Based AI
+- Agent-as-a-Judge: Evaluate Agents with Agents
+- Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge
+- On LLMs-Driven Synthetic Data Generation, Curation, and Evaluation: A Survey
+- A Survey on Knowledge Distillation of Large Language Models
+
 Rate papers 0-1 based on on a numeric scale:
 - Alignment with above focus areas
 - Emphasis on practical implementation over theory
 - Concrete frameworks or solutions
 - Data-driven approaches
 - Relevance to real-world applications
+- Similarity to example papers provided. If paper titles are not similar it should not be a disqualifying factor, but if paper titles are similar it should be a very strong positive signal.
 
 0.0 indicates absolutely no relevance
 0.25 indicates some relevance in one of the areas of interest
