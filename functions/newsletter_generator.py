@@ -46,11 +46,13 @@ Here are some example paper titles that I have found interesting lately for addi
 - Large Language Model Influence on Diagnostic ReasoningA Randomized Clinical Trial
 - InsightBench: Evaluating Business Analytics Agents Through Multi-Step Insight Generation
 - Best Practices and Lessons Learned on Synthetic Data for Language Models
+- Evaluating and Improving the Effectiveness of Synthetic Chest X-Rays for Medical Image Analysis
 - The Social Impact of Generative LLM-Based AI
 - Agent-as-a-Judge: Evaluate Agents with Agents
 - Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge
 - On LLMs-Driven Synthetic Data Generation, Curation, and Evaluation: A Survey
 - A Survey on Knowledge Distillation of Large Language Models
+- Robust Offline Reinforcement Learning with Linearly Structured
 
 Rate papers 0-1 based on on a numeric scale:
 - Alignment with above focus areas
