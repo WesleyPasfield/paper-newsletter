@@ -32,6 +32,14 @@ def create_api_response(status_code: int, body: dict) -> dict:
 def add_subscriber(event, context):
     """Handle new subscriber requests from API Gateway"""
     # Extract API URL from the event
+    # Standard CORS headers
+    cors_headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        'Access-Control-Allow-Methods': 'OPTIONS,POST',
+        'Content-Type': 'application/json'
+    }
+    
     api_url = get_api_url_from_event(event)
     if not api_url:
         logger.error("Could not determine API URL from event")
@@ -40,13 +48,6 @@ def add_subscriber(event, context):
             'headers': cors_headers,
             'body': json.dumps({'error': 'Could not determine API URL'})
         }
-    # Standard CORS headers
-    cors_headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'OPTIONS,POST',
-        'Content-Type': 'application/json'
-    }
     
     # Handle OPTIONS preflight request
     if event.get('httpMethod') == 'OPTIONS':
@@ -91,7 +92,9 @@ def add_subscriber(event, context):
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
         
-        # Check if email already exists
+        verification_token = secrets.token_urlsafe(32)
+        timestamp = datetime.now().isoformat()
+
         try:
             response = table.get_item(Key={'email': email})
             if 'Item' in response:
@@ -102,35 +105,50 @@ def add_subscriber(event, context):
                         'headers': cors_headers,
                         'body': json.dumps({'error': 'Email already subscribed'})
                     }
+                
+                # Update existing record
+                table.update_item(
+                    Key={'email': email},
+                    UpdateExpression='SET #status = :status, verification_token = :token, updated_at = :timestamp, ' 
+                                    'subscription_history = list_append(if_not_exists(subscription_history, :empty_list), :history)',
+                    ExpressionAttributeNames={
+                        '#status': 'status'
+                    },
+                    ExpressionAttributeValues={
+                        ':status': 'pending',
+                        ':token': verification_token,
+                        ':timestamp': timestamp,
+                        ':history': [{
+                            'status': 'pending',
+                            'timestamp': timestamp,
+                            'action': 'resubscribe',
+                            'previous_status': existing_subscriber.get('status', 'unknown')
+                        }],
+                        ':empty_list': []
+                    }
+                )
+            else:
+                # Create new subscriber
+                table.put_item(
+                    Item={
+                        'email': email,
+                        'status': 'pending',
+                        'verification_token': verification_token,
+                        'created_at': timestamp,
+                        'updated_at': timestamp,
+                        'subscription_history': [{
+                            'status': 'pending',
+                            'timestamp': timestamp,
+                            'action': 'initial_subscribe'
+                        }]
+                    }
+                )
         except ClientError as e:
-            logger.error(f"Error checking existing subscriber: {str(e)}")
+            logger.error(f"Error with DynamoDB operation: {str(e)}")
             return {
                 'statusCode': 500,
                 'headers': cors_headers,
-                'body': json.dumps({'error': 'Failed to check subscription status'})
-            }
-
-        # Generate verification token
-        verification_token = secrets.token_urlsafe(32)
-        timestamp = datetime.now().isoformat()
-
-        # Store new subscriber
-        try:
-            table.put_item(
-                Item={
-                    'email': email,
-                    'status': 'pending',
-                    'verification_token': verification_token,
-                    'created_at': timestamp,
-                    'updated_at': timestamp
-                }
-            )
-        except ClientError as e:
-            logger.error(f"Error storing subscriber: {str(e)}")
-            return {
-                'statusCode': 500,
-                'headers': cors_headers,
-                'body': json.dumps({'error': 'Failed to store subscription'})
+                'body': json.dumps({'error': 'Database operation failed'})
             }
 
         # Send verification email
@@ -139,7 +157,6 @@ def add_subscriber(event, context):
             verification_token=verification_token,
             sender=os.environ['SENDER_EMAIL'],
             api_url=api_url
-
         ):
             # If email fails, delete the subscriber record
             try:
@@ -162,7 +179,7 @@ def add_subscriber(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Unexpected error in add_subscriber: {str(e)}")  # Added logging
+        logger.error(f"Unexpected error in add_subscriber: {str(e)}")
         return {
             'statusCode': 500,
             'headers': cors_headers,
@@ -171,7 +188,7 @@ def add_subscriber(event, context):
                 'message': str(e)
             })
         }
-
+    
 def get_api_url_from_event(event):
     """Extract API URL from the event context"""
     request_context = event.get('requestContext', {})
@@ -529,7 +546,7 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
         /* Dark mode styles */
         @media (prefers-color-scheme: dark) {
             .dark-bg { background-color: #2d2d2d !important; }
-            .dark-text { color: #ffffff !important; }
+            .dark-text { color: #f0f0f0 !important; }
             .paper { border-left-color: #4a9eff !important; background-color: #363636 !important; }
             .paper h3 a { color: #4a9eff !important; }
         }
@@ -629,7 +646,6 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                     <tr>
                         <td align="center" valign="top" class="header">
                             <h1 class="dark-text fallback-font">AI Papers Newsletter</h1>
-                            <p class="dark-text fallback-font">{{generated_date}}</p>
                         </td>
                     </tr>
 
@@ -685,7 +701,7 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                                 <a href="{{{unsubscribe_url}}}" style="color: #666666;">Unsubscribe</a>
                             </p>
                             <p class="dark-text fallback-font">
-                                Was this forwarded to you? <a href="{{{subscribe_url}}}" style="color: #666666;">Subscribe here</a>
+                                Was this forwarded to you? <a href="{{{subscribe_url}}}" style="color: #666666;">Subscribe or contact here</a>
                             </p>
                             <p class="dark-text fallback-font">
                                 You received this because you subscribed to the AI Papers Newsletter.<br>
@@ -699,11 +715,11 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
 </body>
 </html>''',
             'TextPart': '''
-AI Papers Newsletter - {{generated_date}}
+AI Papers Newsletter
 
 {{overview}}
 
-Featured Research:
+Featured Papers:
 {{#each featured_papers}}
 * {{title}}
 {{summary}}
@@ -722,7 +738,7 @@ Share this newsletter:
 - Bluesky: https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20{{subscribe_url}}
 - LinkedIn: https://www.linkedin.com/sharing/share-offsite/?url={{subscribe_url}}
 
-Was this forwarded to you? Subscribe at: {{{subscribe_url}}}
+Was this forwarded to you? Subscribe or contact at: {{{subscribe_url}}}
 To unsubscribe: {{{unsubscribe_url}}}'''
         }
     }
@@ -846,7 +862,7 @@ def send_newsletter(json_content: Dict, table_name: str, sender: str) -> Dict:
             return {'message': 'No subscribers found'}
             
         # Create/update SES template with the new format
-        create_or_update_template(ses_client, json_content, unsubscribe_url, subscribe_url)  # Removed unsubscribe_url argument
+        create_or_update_template(ses_client, json_content, unsubscribe_url, subscribe_url)  
         
         # Send emails using the template
         results = send_email_batch(

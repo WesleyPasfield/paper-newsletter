@@ -12,6 +12,12 @@ Automatically generates and sends newsletters about AI research papers using AWS
 
 Keep in mind there might be some required customization in your account, but this should get you really far along the way
 
+## Newsletter Example
+
+Below is an example of the newsletter final output:
+
+![Newsletter Example](./assets/newsletter-example.png)
+
 ## Architecture
 
 The system consists of several key components:

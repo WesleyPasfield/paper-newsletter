@@ -57,6 +57,7 @@ Globals:
         EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
         Stage: !Ref Stage
+        ALERT_EMAIL: !Ref AlertEmail
         SENDER_EMAIL: !Ref SenderEmail
         API_URL: !Sub "https://${ApiGatewayId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
@@ -143,6 +144,7 @@ Resources:
           ANTHROPIC_API_KEY: !Sub "{{resolve:secretsmanager:anthropic/api_key}}"
           EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
           LOG_LEVEL: INFO
+          NEWSLETTER_BUCKET: !Ref NewsletterBucket
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
@@ -308,6 +310,34 @@ Resources:
           Value: !Ref NewsletterFunction
       AlarmActions:
         - !Ref AlarmTopic
+
+  # S3 bucket to store final newsletters
+  NewsletterBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-newsletters"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldNewsletters
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING
+
+  NewsletterFunctionBucketPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-newsletter-bucket-policy"
+      Roles: 
+        - !Ref NewsletterFunctionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource: !Sub "${NewsletterBucket.Arn}/*"
 
   # SES Resources
 

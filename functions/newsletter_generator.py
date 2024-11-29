@@ -137,6 +137,27 @@ def validate_environment_variables():
     if missing_vars:
         raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
+def store_newsletter(json_content: Dict) -> str:
+    """Store newsletter content in S3"""
+    s3_client = boto3.client('s3')
+    bucket_name = os.environ['NEWSLETTER_BUCKET']
+    
+    # Create ISO timestamp-based key
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+    key = f'newsletters/{timestamp}.json'
+    
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=json.dumps(json_content, indent=2),
+            ContentType='application/json'
+        )
+        return f"s3://{bucket_name}/{key}"
+    except Exception as e:
+        logger.error(f"Error storing newsletter: {str(e)}")
+        raise
+
 def process_newsletter_content(content: str) -> Dict:
     """Process newsletter content returned from API"""
     logger.info("Processing newsletter content")
@@ -258,6 +279,9 @@ def lambda_handler(event, context):
             table_name=os.environ['SUBSCRIBERS_TABLE'],
             sender=os.environ['SENDER_EMAIL'],
         )
+
+        s3_location = store_newsletter(json_content)
+        logger.info(f"Newsletter stored at: {s3_location}")
         
         execution_time = (datetime.now() - start_time).total_seconds()
         
@@ -269,7 +293,8 @@ def lambda_handler(event, context):
                 'additional_papers': len(json_content['additional_papers']),
                 'total_papers': json_content['metadata']['total_papers_analyzed']
             },
-            'email_results': email_results
+            'email_results': email_results,
+            'storage_location': s3_location
         }
         
         logger.info(f"Newsletter process completed in {execution_time} seconds")
