@@ -28,6 +28,8 @@ The system consists of several key components:
 - Email Management: Handles subscriptions and delivery
 - Monitoring: Tracks delivery and engagement metrics
 
+![Architecture Diagram](./assets/arch_diagram.png)
+
 ## Prerequisites
 
 - AWS Account with SES in production mode
