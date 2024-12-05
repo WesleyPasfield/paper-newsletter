@@ -4,7 +4,7 @@ import json
 import os
 from typing import Dict, List
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import secrets
 import re
 import time
@@ -372,7 +372,95 @@ def verify_subscriber(event, context) -> dict:
             'headers': cors_headers,
             'body': json.dumps({'error': 'Internal server error'})
         }
-    
+
+def check_and_resend_verifications(event, context):
+    """
+    Send a single verification reminder to subscribers who:
+    - Have been unverified for > 48 hours
+    - Have never received a reminder
+    """
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
+        
+        # Calculate cutoff time (48 hours ago)
+        cutoff_time = (datetime.now() - timedelta(hours=48)).isoformat()
+        
+        # Query for subscribers who need reminders
+        response = table.scan(
+            FilterExpression='#status = :status AND created_at < :cutoff AND attribute_not_exists(reminder_sent)',
+            ExpressionAttributeNames={
+                '#status': 'status'
+            },
+            ExpressionAttributeValues={
+                ':status': 'pending',
+                ':cutoff': cutoff_time
+            }
+        )
+        
+        api_url = os.environ['API_URL']
+        sender_email = os.environ['SENDER_EMAIL']
+        
+        success_count = 0
+        failure_count = 0
+        
+        for item in response.get('Items', []):
+            try:
+                email = item['email']
+                # Generate new verification token for security
+                verification_token = secrets.token_urlsafe(32)
+                
+                logger.info(f"Processing reminder for {email}")
+                
+                # Update token before sending email
+                table.update_item(
+                    Key={'email': email},
+                    UpdateExpression='SET verification_token = :token, reminder_sent = :now, reminder_token = :token',
+                    ExpressionAttributeValues={
+                        ':token': verification_token,
+                        ':now': datetime.now().isoformat()
+                    }
+                )
+                
+                # Send verification reminder
+                if send_verification_email(
+                    email=email,
+                    verification_token=verification_token,
+                    sender=sender_email,
+                    api_url=api_url
+                ):
+                    success_count += 1
+                    logger.info(f"Successfully sent verification reminder to {email}")
+                else:
+                    failure_count += 1
+                    logger.error(f"Failed to send verification reminder to {email}")
+                
+            except Exception as e:
+                failure_count += 1
+                logger.error(f"Error processing subscriber {email}: {str(e)}")
+        
+        logger.info(f"Reminder process completed. Successes: {success_count}, Failures: {failure_count}")
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Verification reminder process completed',
+                'success_count': success_count,
+                'failure_count': failure_count,
+                'batch_size': len(response.get('Items', []))
+            })
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in check_and_resend_verifications: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': 'Internal server error',
+                'message': str(e)
+            })
+        }
+
 def unsubscribe_handler(event, context) -> dict:
     """Handle unsubscribe requests"""
     # Use same CORS headers as working add_subscriber function

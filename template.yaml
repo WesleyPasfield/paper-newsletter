@@ -64,7 +64,6 @@ Globals:
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
-
   Api:
     Cors:
       AllowMethods: "'*'"
@@ -246,6 +245,94 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
+
+  VerificationReminderFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.check_and_resend_verifications
+      Description: "Sends one-time verification reminders to unverified subscribers after 48 hours"
+      Environment:
+        Variables:
+          SUBSCRIBERS_TABLE: !Ref SubscribersTable
+          SENDER_EMAIL: !Ref SenderEmail
+          API_URL: !Sub "${AWS::Region}-${AWS::AccountId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendTemplatedEmail
+                - ses:SendEmail
+                - ses:GetTemplate
+              Resource: "*"
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+            Name: !Sub "${AWS::StackName}-verification-reminder-schedule"
+            Description: "Check for unverified subscribers hourly"
+            Enabled: true
+
+  VerificationReminderDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-verification-metrics"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Newsletter/Verification", "ReminderEmailSuccess", { "stat": "Sum" } ],
+                  [ ".", "ReminderEmailFailure", { "stat": "Sum" } ],
+                  [ ".", "ReminderProcessingError", { "stat": "Sum" } ],
+                  [ ".", "ReminderSystemError", { "stat": "Sum" } ]
+                ],
+                "period": 3600,
+                "region": "${AWS::Region}",
+                "title": "Verification Reminder Metrics",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "Newsletter/Verification", "ReminderBatchSize", { "stat": "Sum" } ]
+                ],
+                "period": 3600,
+                "region": "${AWS::Region}",
+                "title": "Reminder Batch Sizes",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+  VerificationReminderAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alert when verification reminder system has high failure rate"
+      MetricName: ReminderEmailFailure
+      Namespace: Newsletter/Verification
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlarmTopic
 
   UnsubscribeFunction:
     Type: AWS::Serverless::Function
