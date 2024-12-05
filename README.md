@@ -2,6 +2,8 @@
 
 Automatically generates and sends newsletters about AI research papers using AWS Lambda and Claude. Create your own prompts that fit your desired use case.
 
+[Sign up here](https://wesleypasfield.com/aipapers/) for  the original version.
+
 ## Features
 
 - 🤖 Uses Claude to evaluate and summarize AI research papers
