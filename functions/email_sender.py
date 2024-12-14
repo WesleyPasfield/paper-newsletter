@@ -792,6 +792,9 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                                 Was this forwarded to you? <a href="{{{subscribe_url}}}" style="color: #666666;">Subscribe or contact here</a>
                             </p>
                             <p class="dark-text fallback-font">
+                                Check out the <a href="https://wesleypasfield.substack.com/" style="color: #666666;">blog</a> for more AI related content
+                            </p>
+                            <p class="dark-text fallback-font">
                                 You received this because you subscribed to the AI Papers Newsletter.<br>
                             </p>
                         </td>
@@ -826,6 +829,7 @@ Share this newsletter:
 - Bluesky: https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20{{subscribe_url}}
 - LinkedIn: https://www.linkedin.com/sharing/share-offsite/?url={{subscribe_url}}
 
+Check out the blog for more AI related content: https://wesleypasfield.substack.com/
 Was this forwarded to you? Subscribe or contact at: {{{subscribe_url}}}
 To unsubscribe: {{{unsubscribe_url}}}'''
         }
@@ -859,9 +863,24 @@ def get_subscribers(table_name: str) -> List[str]:
     except ClientError as e:
         logger.error(f"Error scanning DynamoDB table: {str(e)}")
         raise
+# Note need to update send_email_batch to enable testing
+
+def test_prod_check(emails: List[str], test_email: str) -> List[str]:
+    """
+    Returns appropriate recipient list based on test mode settings
+    """
+    test_mode = os.environ.get('EMAIL_TEST_MODE', 'false').lower() == 'true'
+    
+    if test_mode and test_email:
+        logger.info(f"Test mode enabled: Sending single test email instead of {len(emails)} subscriber emails")
+        return [test_email]
+    return emails
 
 def send_email_batch(ses_client, source: str, emails: List[str], json_content: Dict, unsubscribe_url: str, subscribe_url: str) -> Dict:
     results = {'successful': 0, 'failed': 0, 'failures': []}
+
+    # Get appropriate recipient list based on test mode
+    emails = test_prod_check(emails, os.environ.get('EMAIL_TEST_ADDRESS', ''))
     
     default_template_data = {
         'date': datetime.now().strftime('%B %d, %Y'),
@@ -968,3 +987,205 @@ def send_newsletter(json_content: Dict, table_name: str, sender: str) -> Dict:
     except Exception as e:
         logger.error(f"Error sending newsletter: {str(e)}")
         raise
+
+def get_subscriber_counts(table_name: str) -> dict:
+    """
+    Query DynamoDB to get counts of subscribers by status using direct scan approach
+    """
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(table_name)
+    
+    try:
+        # Get verified subscribers
+        verified = table.scan(
+            FilterExpression='#status = :verified',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':verified': 'verified'},
+        )
+        
+        # Get pending subscribers
+        pending = table.scan(
+            FilterExpression='#status = :verified',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':verified': 'pending'},
+        )
+        
+        # Get unsubscribed users
+        unsubscribed = table.scan(
+            FilterExpression='#status = :unsubscribed',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':unsubscribed': 'unsubscribed'},
+        )
+        
+        # Get all records for total count
+        all_records = table.scan()
+        
+        metrics = {
+            'total_subscribers': all_records['Count'],
+            'status_counts': {
+                'verified': verified['Count'],
+                'pending': pending['Count'],
+                'unsubscribed': unsubscribed['Count']
+            },
+            'metadata': {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'table_name': os.environ['SUBSCRIBERS_TABLE']
+            }
+        }
+        
+        logger.info(f"Retrieved metrics: {json.dumps(metrics, indent=2)}")
+        return metrics
+        
+    except ClientError as e:
+        logger.error(f"Error querying DynamoDB: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise
+
+def sub_status_checker(event, context):
+    """
+    Handler for subscriber metrics Lambda
+    Returns subscriber counts by status with CORS headers
+    """
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        'Access-Control-Allow-Methods': 'GET,OPTIONS',
+        'Content-Type': 'application/json'
+    }
+    
+    # Handle OPTIONS request
+    if event.get('httpMethod') == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': ''
+        }
+
+    dynamo_table_name = os.environ['SUBSCRIBERS_TABLE']
+    
+    try:
+        metrics = get_subscriber_counts(dynamo_table_name)
+        
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': json.dumps(metrics, indent=2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': headers,
+            'body': json.dumps({
+                'error': 'Internal server error',
+                'message': str(e)
+            })
+        }
+
+def bulk_verifier(event, context):
+    """
+    Manually triggered function to send verification reminders to all pending subscribers
+    """
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        'Access-Control-Allow-Methods': 'POST,OPTIONS',
+        'Content-Type': 'application/json'
+    }
+    
+    # Handle OPTIONS request
+    if event.get('httpMethod') == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': ''
+        }
+    
+    try:
+        # Get all pending subscribers
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
+        
+        response = table.scan(
+            FilterExpression='#status = :pending',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':pending': 'pending'}
+        )
+        
+        pending_subscribers = response['Items']
+        
+        # Handle pagination if necessary
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(
+                FilterExpression='#status = :pending',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':pending': 'pending'},
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            pending_subscribers.extend(response['Items'])
+        
+        if not pending_subscribers:
+            return {
+                'statusCode': 200,
+                'headers': headers,
+                'body': json.dumps({
+                    'message': 'No pending subscribers found',
+                    'count': 0
+                })
+            }
+        
+        # Send emails
+        ses_client = boto3.client('ses')
+        sent_count = 0
+        failures = []
+        
+        for subscriber in pending_subscribers:
+            try:
+                verification_url = f"{os.environ['API_URL']}/verify?email={subscriber['email']}&token={subscriber['verification_token']}"
+                
+                response = ses_client.send_templated_email(
+                    Source=os.environ['SENDER_EMAIL'],
+                    Destination={
+                        'ToAddresses': [subscriber['email']]
+                    },
+                    Template='VerificationTemplate',
+                    TemplateData=json.dumps({
+                        'verification_url': verification_url,
+                        'email': subscriber['email']
+                    }),
+                    ConfigurationSetName=os.environ['EMAIL_CONFIGURATION_SET']
+                )
+                sent_count += 1
+                logger.info(f"Sent reminder to {subscriber['email']}")
+                
+            except Exception as e:
+                failures.append({
+                    'email': subscriber['email'],
+                    'error': str(e)
+                })
+                logger.error(f"Failed to send reminder to {subscriber['email']}: {str(e)}")
+        
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': json.dumps({
+                'message': 'Reminder emails processed',
+                'sent_count': sent_count,
+                'total_pending': len(pending_subscribers),
+                'failures': failures if failures else None
+            }, indent=2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing reminders: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': headers,
+            'body': json.dumps({
+                'error': 'Internal server error',
+                'message': str(e)
+            })
+        }

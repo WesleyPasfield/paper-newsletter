@@ -169,6 +169,7 @@ def process_newsletter_content(content: str) -> Dict:
             content = codecs.escape_decode(content)[0].decode('utf-8')
         
         # Parse JSON from the string
+    
         newsletter_data = json.loads(content)
         
         # Initialize missing sections if they don't exist

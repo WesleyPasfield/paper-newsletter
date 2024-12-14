@@ -6,4 +6,5 @@ s3_prefix = "papernewsletter"
 region = "us-west-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "Stage=\"prod\" SubLandingPage=\"insertlandingpage.com" SenderEmail=\"Insert Newsletter Name <newsletter@example.com>\" AlertEmail=\"your.email@example.com\" UseDomainIdentity=\"true\" DomainName=\"newsletter.example.com\" HostedZoneId=\"ZXXXXXXXXXX\" ApiGatewayId=\"xxxxxxxxxxxx\""image_repositories = []
+parameter_overrides = "Stage=\"prod\" SubLandingPage=\"insertlandingpage.com" SenderEmail=\"Insert Newsletter Name <newsletter@example.com>\" AlertEmail=\"your.email@example.com\" UseDomainIdentity=\"true\" DomainName=\"newsletter.example.com\" HostedZoneId=\"ZXXXXXXXXXX\" ApiGatewayId=\"xxxxxxxxxxxx\"EmailTestMode=\"true\" EmailTestAddress=\"aipapernewsletter@gmail.com\""
+image_repositories = []

@@ -37,6 +37,14 @@ Parameters:
     Type: String
     Default: ""
     Description: URL for subscription landing page
+  EmailTestMode:
+    Type: String
+    Default: ""
+    Description: Set to "true" to enable email test mode
+  EmailTestAddress:
+    Type: String
+    Default: ""
+    Description: Email address to send test emails to
 
 Conditions:
   CreateDomainIdentity: !Equals 
@@ -61,6 +69,8 @@ Globals:
         SENDER_EMAIL: !Ref SenderEmail
         API_URL: !Sub "https://${ApiGatewayId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
+        EMAIL_TEST_MODE: !Ref EmailTestMode
+        EMAIL_TEST_ADDRESS: !Ref EmailTestAddress
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
@@ -365,6 +375,65 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
+
+  SubscriberMetricsFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.sub_status_checker
+      Environment:
+        Variables:
+          SUBSCRIBERS_TABLE: !Ref SubscribersTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SubscribersTable
+      Events:
+        MetricsGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /metrics
+            Method: GET
+        MetricsOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /metrics
+            Method: OPTIONS
+
+  BulkVerifierFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: 
+      - SubscribersTable
+      - EmailConfigurationSet
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.bulk_verifier
+      Description: "Manually triggered bulk verification reminder sender"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendTemplatedEmail
+              Resource: "*"
+      Events:
+        BulkVerifyPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /bulk-verify
+            Method: POST
+        BulkVerifyOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /bulk-verify
+            Method: OPTIONS
 
   # Monitoring Resources
   AlarmTopic:

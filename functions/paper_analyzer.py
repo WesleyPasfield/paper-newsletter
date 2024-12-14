@@ -102,8 +102,7 @@ class PaperAnalyzer:
 
             full_papers_content = []
             max_chars_per_paper = 50000
-
-            for paper in sorted(papers, key=lambda x: x.interest_score, reverse=True):
+            for paper in papers:
                 full_papers_content.append(f"""
 ## {paper.title} (Interest Score: {paper.interest_score:.2f})
 
@@ -116,7 +115,7 @@ Full Text:
 
             additional_papers = [
                 f"- [{p.title}]({p.link}) (Interest Score: {p.interest_score:.2f}) **Paper Type** Additional Paper"
-                for p in sorted(papers_without_content, key=lambda x: x.interest_score, reverse=True)
+                for p in papers_without_content
             ]
 
             if not full_papers_content and not additional_papers:
@@ -135,7 +134,7 @@ Additional Papers. These should not receive a summary in the JSON response:
             response = self.client.messages.create(
                 model=self.claude_model_pricey,
                 system=self.newsletter_prompt,
-                max_tokens=4000,
+                max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -185,6 +184,7 @@ Additional Papers. These should not receive a summary in the JSON response:
         feed = feedparser.parse(feed_url)
         interesting_papers = []
         papers_without_content = []
+        all_papers = []
 
         logger.info(f"Processing {len(feed.entries)} papers from feed {feed_url}")
 
@@ -220,20 +220,50 @@ Additional Papers. These should not receive a summary in the JSON response:
             else:
                 papers_without_content.append(paper)
                 logger.info(f'Additional Papers: {paper.title}')
+            
+            all_papers.append(paper)
 
-        return interesting_papers, papers_without_content
+        return interesting_papers, papers_without_content, all_papers
 
     def process_multiple_feeds(self, feed_urls: list[str], title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> str:
         all_interesting_papers = []
         all_papers_without_content = []
+        all_available_papers = []
 
         for feed_url in feed_urls:
-            interesting_papers, papers_without_content = self.process_single_feed(
+            interesting_papers, papers_without_content, available_papers = self.process_single_feed(
                 feed_url, title_threshold, abstract_threshold
             )
             all_interesting_papers.extend(interesting_papers)
             all_papers_without_content.extend(papers_without_content)
+            all_available_papers.extend(available_papers)
 
         logger.info(f'Total papers found across all feeds: {len(all_interesting_papers)} with content, {len(all_papers_without_content)} without')
+        
+        # If we have fewer than 2 featured papers, adjust thresholds to include more
+        if len(all_interesting_papers) < 2:
+            logger.info("Found fewer than 2 featured papers. Adjusting thresholds to include more papers.")
+            # Gradually lower thresholds until we get 2 featured papers
+            while len(all_interesting_papers) < 2 and (title_threshold > 0 or abstract_threshold > 0):
+                title_threshold -= 0.1
+                abstract_threshold -= 0.1
+                self.processed_papers: Set[Paper] = set() # Reset processed papers
+                
+                for feed_url in feed_urls:
+                    papers_review, ignore_this_1, ignore_this_two  = self.process_single_feed(
+                        feed_url, title_threshold, abstract_threshold
+                    )
+                    # Only add papers that aren't already in our lists
+                    new_papers = [p for p in papers_review if p not in all_interesting_papers]
+                    all_interesting_papers.extend(new_papers)
+                    
+                    if len(all_interesting_papers) >= 2:
+                        all_interesting_papers = all_interesting_papers[:2]
+                        break
+                
+                if title_threshold <= 0 and abstract_threshold <= 0:
+                    break
+            
+            logger.info(f'After threshold adjustment: {len(all_interesting_papers)} featured papers found with final thresholds - title: {title_threshold:.2f}, abstract: {abstract_threshold:.2f}')
         
         return self.create_newsletter(all_interesting_papers, all_papers_without_content)
