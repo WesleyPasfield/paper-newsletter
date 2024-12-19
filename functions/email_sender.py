@@ -4,7 +4,7 @@ import json
 import os
 from typing import Dict, List
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import secrets
 import re
 import time
@@ -874,6 +874,7 @@ def test_prod_check(emails: List[str], test_email: str) -> List[str]:
     if test_mode and test_email:
         logger.info(f"Test mode enabled: Sending single test email instead of {len(emails)} subscriber emails")
         return [test_email]
+
     return emails
 
 def send_email_batch(ses_client, source: str, emails: List[str], json_content: Dict, unsubscribe_url: str, subscribe_url: str) -> Dict:

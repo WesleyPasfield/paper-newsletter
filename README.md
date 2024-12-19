@@ -136,4 +136,8 @@ Review the security checklist before deployment:
 - Rate limiting
 - CORS configuration
 
+## Testing
+
+The `EmailTestMode` and `EmailTestAddress` parameters in the SamConfig enable testing. If the email test mode is sent to true, all emails will go to the email in the `EmailTestAddress` parameter. This enables making changes to the service without emailing the full subscriber base.
+
 I definitely made some updates manually in the console, and had some resources already in my account so everything might not be perfectly smooth, particilarly with DNS/SES

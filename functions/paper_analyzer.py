@@ -240,11 +240,11 @@ Additional Papers. These should not receive a summary in the JSON response:
 
         logger.info(f'Total papers found across all feeds: {len(all_interesting_papers)} with content, {len(all_papers_without_content)} without')
         
-        # If we have fewer than 2 featured papers, adjust thresholds to include more
-        if len(all_interesting_papers) < 2:
-            logger.info("Found fewer than 2 featured papers. Adjusting thresholds to include more papers.")
-            # Gradually lower thresholds until we get 2 featured papers
-            while len(all_interesting_papers) < 2 and (title_threshold > 0 or abstract_threshold > 0):
+        # If we have fewer than 4 featured papers, adjust thresholds to include more
+        if len(all_interesting_papers) < 4:
+            logger.info("Found fewer than 4 featured papers. Adjusting thresholds to include more papers.")
+            # Gradually lower thresholds until we get 4 featured papers
+            while len(all_interesting_papers) < 4 and (title_threshold > 0 or abstract_threshold > 0):
                 title_threshold -= 0.1
                 abstract_threshold -= 0.1
                 self.processed_papers: Set[Paper] = set() # Reset processed papers
@@ -257,8 +257,8 @@ Additional Papers. These should not receive a summary in the JSON response:
                     new_papers = [p for p in papers_review if p not in all_interesting_papers]
                     all_interesting_papers.extend(new_papers)
                     
-                    if len(all_interesting_papers) >= 2:
-                        all_interesting_papers = all_interesting_papers[:2]
+                    if len(all_interesting_papers) >= 4:
+                        all_interesting_papers = all_interesting_papers[:4]
                         break
                 
                 if title_threshold <= 0 and abstract_threshold <= 0:
