@@ -633,10 +633,15 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
         
         /* Dark mode styles */
         @media (prefers-color-scheme: dark) {
-            .dark-bg { background-color: #2d2d2d !important; }
-            .dark-text { color: #f0f0f0 !important; }
-            .paper { border-left-color: #4a9eff !important; background-color: #363636 !important; }
+            .dark-bg { background-color: #1a1a1a !important; }
+            .dark-text { color: #ffffff !important; }
+            .paper { border-left-color: #4a9eff !important; background-color: #232323 !important; }
             .paper h3 a { color: #4a9eff !important; }
+            .header { background-color: #1a1a1a !important; }
+            .body { background-color: #1a1a1a !important; }
+            .container { background-color: #232323 !important; }
+            .footer { border-color: #333333 !important; color: #ffffff !important; }
+            .metadata { color: #cccccc !important; }
         }
         
         /* Responsive styles */

@@ -21,12 +21,15 @@ EVAL_PROMPT = """You are evaluating academic papers for an expert specializing i
 - Production deployment challenges
 - User experience validation
 - Certification processes for AI systems
+- Impact of test or inference time optimizations on model performance and governance strategies
 
 2. Societal and economic impacts of generative AI:
 - Knowledge work transformation
 - Education system adaptation
 - Business model viability in an AI-first world
 - Implementation challenges at scale
+- Impact of autonomous agent-based systems on labor markets
+- Human and AI collaboration frameworks
 
 3. Technical focus areas:
 - LLM evaluation and benchmarking
@@ -34,6 +37,8 @@ EVAL_PROMPT = """You are evaluating academic papers for an expert specializing i
 - Data curation and quality assessment
 - Converting research demos to production applications
 - Real-world deployment architectures
+- Agent based LLM applications
+- Test or Inference time optimization
 
 Here are some example paper titles that I have found interesting lately for additional context:
 
@@ -43,7 +48,7 @@ Here are some example paper titles that I have found interesting lately for addi
 - Towards Monosemanticity: Decomposing Language Models With Dictionary Learning
 - Judging the Judges: Evaluating Alignment and Vulnerabilities in LLMs-as-Judges
 - LalaEval: A Holistic Human Evaluation Framework for Domain-Specific Large Language Models
-- Large Language Model Influence on Diagnostic ReasoningA Randomized Clinical Trial
+- Large Language Model Influence on Diagnostic Reasoning A Randomized Clinical Trial
 - InsightBench: Evaluating Business Analytics Agents Through Multi-Step Insight Generation
 - Best Practices and Lessons Learned on Synthetic Data for Language Models
 - Evaluating and Improving the Effectiveness of Synthetic Chest X-Rays for Medical Image Analysis
@@ -52,7 +57,10 @@ Here are some example paper titles that I have found interesting lately for addi
 - Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge
 - On LLMs-Driven Synthetic Data Generation, Curation, and Evaluation: A Survey
 - A Survey on Knowledge Distillation of Large Language Models
-- Robust Offline Reinforcement Learning with Linearly Structured
+- How Well Do LLMs Generate Code for Different Application Domains? Benchmark and Evaluation
+- Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters
+- Language Models and a second opinion use case: The Pocket Professional
+- Turn Every Application into an Agent: Towards Efficient Human-Agent-Computer Interaction with API-First LLM-Based Agents
 
 Rate papers 0-1 based on on a numeric scale:
 - Alignment with above focus areas
@@ -80,7 +88,7 @@ You do NOT define what is a featured vs. additional paper, that information is p
   "featured_papers": [
     {
       "title": "Full title of the paper",
-      "summary": "2-3 paragraphs summarizing technical contributions, practical implications and key takeaways",
+      "summary": "2-3 paragraphs summarizing technical contributions, practical implications and key takeaways. Emphasize key figures and be opinionated",
       "link": "https://arxiv.org/abs/paper-id"
     }
   ],
@@ -93,7 +101,7 @@ You do NOT define what is a featured vs. additional paper, that information is p
   "metadata": {
     "generated_date": "2024-11-21",
     "total_papers_analyzed": 10,
-    "featured_papers_count": 2,
+    "featured_papers_count": 7,
     "additional_papers_count": 3
   }
 }"""
