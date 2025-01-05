@@ -4,6 +4,8 @@ Automatically generates and sends newsletters about AI research papers using AWS
 
 [Sign up here](https://wesleypasfield.com/aipapers/) for  the original version.
 
+Here's an [article](https://substack.com/home/post/p-152582033) I put together that walks through the full end-to-end building process.
+
 ## Features
 
 - 🤖 Uses Claude to evaluate and summarize AI research papers
