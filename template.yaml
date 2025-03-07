@@ -178,7 +178,7 @@ Resources:
         Schedule:
           Type: Schedule
           Properties:
-            Schedule: cron(0 12 ? * TUE,FRI *)
+            Schedule: cron(0 12 ? * TUE *)
             Name: !Sub "${AWS::StackName}-newsletter-schedule-event"
             Description: "Newsletter generation schedule event"
             Enabled: true
