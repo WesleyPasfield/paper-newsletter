@@ -31,13 +31,19 @@ class Paper:
         return self.title == other.title or self.link == other.link
 
 class PaperAnalyzer:
-    def __init__(self, anthropic_api_key: str, eval_prompt: str, newsletter_prompt: str):
+    def __init__(self, anthropic_api_key: str, eval_prompt: str, newsletter_prompt: str, previously_included_papers: Set[str] = None):
         self.client = Anthropic(api_key=anthropic_api_key)
         self.claude_model_cheap = "claude-3-haiku-20240307"
         self.claude_model_pricey = "claude-3-5-sonnet-latest"
         self.eval_prompt = eval_prompt
         self.newsletter_prompt = newsletter_prompt
         self.processed_papers: Set[Paper] = set()
+        self.previously_included_papers = previously_included_papers or set()
+        
+        # Convert all previously included papers to lowercase for case-insensitive matching
+        self.previously_included_papers = {p.lower() for p in self.previously_included_papers}
+        
+        logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
 
     def api_call_with_retry(self, max_retries: int = 5, initial_delay: int = 2, func=None):
         attempt = 0
@@ -180,7 +186,7 @@ Additional Papers. These should not receive a summary in the JSON response:
             logger.error(f"Error fetching HTML content: {str(e)}")
             return ""
 
-    def process_single_feed(self, feed_url: str, title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> tuple[list[Paper], list[Paper]]:
+    def process_single_feed(self, feed_url: str, title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> tuple[list[Paper], list[Paper], list[Paper]]:
         feed = feedparser.parse(feed_url)
         interesting_papers = []
         papers_without_content = []
@@ -195,8 +201,14 @@ Additional Papers. These should not receive a summary in the JSON response:
                 abstract=entry.get('summary', '')
             )
             
+            # Check if paper is in previously included papers
+            if paper.title.lower() in self.previously_included_papers or paper.link.lower() in self.previously_included_papers:
+                logger.info(f'Skipping previously included paper: {paper.title}')
+                continue
+            
+            # Check if paper was already processed in this run
             if paper in self.processed_papers:
-                logger.info(f'Skipping duplicate paper: {paper.title}')
+                logger.info(f'Skipping duplicate paper within current run: {paper.title}')
                 continue
             
             self.processed_papers.add(paper)
@@ -247,10 +259,14 @@ Additional Papers. These should not receive a summary in the JSON response:
             while len(all_interesting_papers) < 4 and (title_threshold > 0 or abstract_threshold > 0):
                 title_threshold -= 0.1
                 abstract_threshold -= 0.1
-                self.processed_papers: Set[Paper] = set() # Reset processed papers
+                
+                # Reset processed papers but keep track of which papers were already included
+                # We need to preserve previously_included_papers to avoid duplicates
+                current_batch = self.processed_papers.copy()
+                self.processed_papers = set()
                 
                 for feed_url in feed_urls:
-                    papers_review, ignore_this_1, ignore_this_two  = self.process_single_feed(
+                    papers_review, ignore_this_1, ignore_this_two = self.process_single_feed(
                         feed_url, title_threshold, abstract_threshold
                     )
                     # Only add papers that aren't already in our lists
@@ -260,6 +276,9 @@ Additional Papers. These should not receive a summary in the JSON response:
                     if len(all_interesting_papers) >= 4:
                         all_interesting_papers = all_interesting_papers[:4]
                         break
+                
+                # Add back the papers from the previous batch to avoid processing them again
+                self.processed_papers.update(current_batch)
                 
                 if title_threshold <= 0 and abstract_threshold <= 0:
                     break

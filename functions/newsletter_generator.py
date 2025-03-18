@@ -6,7 +6,7 @@ from .email_sender import send_newsletter
 import logging
 from datetime import datetime
 import codecs
-from typing import Dict
+from typing import Dict, List, Set
 import boto3
 from botocore.exceptions import ClientError
 
@@ -139,6 +139,7 @@ def validate_environment_variables():
         'ANTHROPIC_API_KEY',
         'SUBSCRIBERS_TABLE',
         'SENDER_EMAIL',
+        'NEWSLETTER_BUCKET',
     ]
     
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
@@ -226,6 +227,119 @@ def validate_paper_format(paper: Dict, is_featured: bool = True) -> bool:
     
     return all(field in paper for field in required_fields)
 
+def get_previously_included_papers() -> Set[str]:
+    """
+    Retrieve all paper titles and links from previous newsletters stored in S3.
+    Returns a set of strings (titles and links) for quick duplicate checking.
+    """
+    logger.info("Retrieving previously included papers from S3")
+    s3_client = boto3.client('s3')
+    bucket_name = os.environ['NEWSLETTER_BUCKET']
+    
+    try:
+        # List all objects in the newsletters folder
+        response = s3_client.list_objects_v2(
+            Bucket=bucket_name,
+            Prefix='newsletters/'
+        )
+        
+        if 'Contents' not in response:
+            logger.info("No previous newsletters found in S3")
+            return set()
+        
+        # Track all paper titles and links we've seen before
+        previously_included = set()
+        
+        for obj in response.get('Contents', []):
+            try:
+                # Get the newsletter JSON file
+                file_response = s3_client.get_object(
+                    Bucket=bucket_name,
+                    Key=obj['Key']
+                )
+                
+                newsletter_data = json.loads(file_response['Body'].read().decode('utf-8'))
+                
+                # Extract paper titles and links from featured papers
+                for paper in newsletter_data.get('featured_papers', []):
+                    if 'title' in paper:
+                        previously_included.add(paper['title'].lower())
+                    if 'link' in paper:
+                        previously_included.add(paper['link'].lower())
+                
+                # Extract paper titles and links from additional papers
+                for paper in newsletter_data.get('additional_papers', []):
+                    if 'title' in paper:
+                        previously_included.add(paper['title'].lower())
+                    if 'link' in paper:
+                        previously_included.add(paper['link'].lower())
+                
+            except Exception as e:
+                logger.warning(f"Error processing newsletter file {obj['Key']}: {str(e)}")
+                continue
+        
+        logger.info(f"Found {len(previously_included)} previously included paper titles/links")
+        return previously_included
+        
+    except Exception as e:
+        logger.error(f"Error retrieving previously included papers: {str(e)}")
+        return set()
+
+def filter_duplicate_papers(json_content: Dict, previously_included: Set[str]) -> Dict:
+    """
+    Filter out papers that have been included in previous newsletters.
+    Returns the updated json_content with duplicates removed.
+    """
+    logger.info("Filtering out previously included papers")
+    
+    if not previously_included:
+        logger.info("No previously included papers found, skipping filter")
+        return json_content
+    
+    # Filter featured papers
+    filtered_featured = []
+    for paper in json_content.get('featured_papers', []):
+        title = paper.get('title', '').lower()
+        link = paper.get('link', '').lower()
+        
+        if title in previously_included or link in previously_included:
+            logger.info(f"Filtering out duplicate featured paper: {title}")
+            continue
+        
+        filtered_featured.append(paper)
+    
+    # Filter additional papers
+    filtered_additional = []
+    for paper in json_content.get('additional_papers', []):
+        title = paper.get('title', '').lower()
+        link = paper.get('link', '').lower()
+        
+        if title in previously_included or link in previously_included:
+            logger.info(f"Filtering out duplicate additional paper: {title}")
+            continue
+        
+        filtered_additional.append(paper)
+    
+    # Update the json_content with filtered papers
+    json_content['featured_papers'] = filtered_featured
+    json_content['additional_papers'] = filtered_additional
+    
+    # Update metadata counts
+    if 'metadata' in json_content:
+        json_content['metadata']['featured_papers_count'] = len(filtered_featured)
+        json_content['metadata']['additional_papers_count'] = len(filtered_additional)
+        json_content['metadata']['total_papers_analyzed'] = len(filtered_featured) + len(filtered_additional)
+    
+    filtered_count = len(json_content.get('featured_papers', [])) + len(json_content.get('additional_papers', []))
+    logger.info(f"After filtering: {len(filtered_featured)} featured papers, {len(filtered_additional)} additional papers")
+    
+    # If all papers were filtered out, add a note to the overview
+    if filtered_count == 0:
+        json_content['overview'] = "All papers were filtered out as they were already included in previous newsletters."
+        logger.warning("All papers were filtered out as duplicates")
+    
+    return json_content
+
 def lambda_handler(event, context):
     try:
         validate_environment_variables()
@@ -235,16 +349,28 @@ def lambda_handler(event, context):
         
         anthropic_api_key = get_secret()
         
+        # Get previously included papers first
+        previously_included = get_previously_included_papers()
+        logger.info(f"Found {len(previously_included)} previously included papers")
+        
         analyzer = PaperAnalyzer(
             anthropic_api_key=anthropic_api_key,
             eval_prompt=EVAL_PROMPT,
-            newsletter_prompt=NEWSLETTER_PROMPT
+            newsletter_prompt=NEWSLETTER_PROMPT,
+            previously_included_papers=previously_included
         )
         
+        # Initial feed sources
         feed_urls = [
             "https://hedgehog.den.dev/feeds/toprecent-week.xml",
             "https://hedgehog.den.dev/feeds/home.xml",
             "https://hedgehog.den.dev/feeds/random-last-week.xml"
+        ]
+        
+        # Backup feed sources if we don't have enough papers
+        backup_feed_urls = [
+            "https://hedgehog.den.dev/feeds/recent.xml",
+            "https://hedgehog.den.dev/feeds/recent-month.xml"
         ]
         
         logger.info("Starting paper analysis and newsletter generation")
@@ -262,6 +388,34 @@ def lambda_handler(event, context):
                 if not validate_paper_format(paper, is_featured=False):
                     raise ValueError(f"Invalid additional paper format: {paper}")
             
+            # If we have fewer than 3 featured papers, try using backup feeds
+            min_featured_papers = 3
+            if len(json_content['featured_papers']) < min_featured_papers and backup_feed_urls:
+                logger.info(f"Found only {len(json_content['featured_papers'])} featured papers. Trying backup feeds.")
+                
+                # Process backup feeds
+                backup_content = analyzer.process_multiple_feeds(backup_feed_urls)
+                backup_json = process_newsletter_content(backup_content)
+                
+                # Add backup papers to our existing content
+                if backup_json.get('featured_papers'):
+                    json_content['featured_papers'].extend(backup_json['featured_papers'])
+                    logger.info(f"Added {len(backup_json['featured_papers'])} more featured papers from backup feeds")
+                
+                if backup_json.get('additional_papers'):
+                    json_content['additional_papers'].extend(backup_json['additional_papers'])
+                    logger.info(f"Added {len(backup_json['additional_papers'])} more additional papers from backup feeds")
+                
+                # Update metadata counts
+                if 'metadata' in json_content:
+                    json_content['metadata']['featured_papers_count'] = len(json_content['featured_papers'])
+                    json_content['metadata']['additional_papers_count'] = len(json_content['additional_papers'])
+                    json_content['metadata']['total_papers_analyzed'] = len(json_content['featured_papers']) + len(json_content['additional_papers'])
+                
+                # If we added more papers, update the overview
+                if len(json_content['featured_papers']) > 0 or len(json_content['additional_papers']) > 0:
+                    json_content['overview'] = f"This newsletter includes papers from our regular and extended feeds. {json_content.get('overview', '')}"
+            
         except Exception as e:
             logger.error(f"Error processing newsletter content: {str(e)}")
             return {
@@ -277,7 +431,7 @@ def lambda_handler(event, context):
             return {
                 'statusCode': 200,
                 'body': json.dumps({
-                    'message': 'No papers met the criteria for inclusion in the newsletter',
+                    'message': 'No papers available for the newsletter - all filtered or none met criteria',
                     'metadata': json_content['metadata']
                 })
             }
@@ -303,7 +457,8 @@ def lambda_handler(event, context):
                 'total_papers': json_content['metadata']['total_papers_analyzed']
             },
             'email_results': email_results,
-            'storage_location': s3_location
+            'storage_location': s3_location,
+            'filtered_duplicates': True
         }
         
         logger.info(f"Newsletter process completed in {execution_time} seconds")

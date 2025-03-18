@@ -493,7 +493,13 @@ Resources:
             Action:
               - s3:PutObject
               - s3:GetObject
+              - s3:ListObjects
+              - s3:ListObjectsV2
             Resource: !Sub "${NewsletterBucket.Arn}/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !Sub "${NewsletterBucket.Arn}"
 
   # SES Resources
 
