@@ -362,15 +362,14 @@ def lambda_handler(event, context):
         
         # Initial feed sources
         feed_urls = [
-            "https://hedgehog.den.dev/feeds/toprecent-week.xml",
-            "https://hedgehog.den.dev/feeds/home.xml",
-            "https://hedgehog.den.dev/feeds/random-last-week.xml"
+            "https://rss.arxiv.org/rss/cs.AI",
+            "https://hedgehog.den.dev/feeds/toprecent-week.xml"
         ]
         
         # Backup feed sources if we don't have enough papers
         backup_feed_urls = [
-            "https://hedgehog.den.dev/feeds/recent.xml",
-            "https://hedgehog.den.dev/feeds/recent-month.xml"
+            "https://hedgehog.den.dev/feeds/home.xml",
+            "https://hedgehog.den.dev/feeds/random-last-week.xml"
         ]
         
         logger.info("Starting paper analysis and newsletter generation")

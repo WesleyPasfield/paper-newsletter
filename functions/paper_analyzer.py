@@ -191,10 +191,16 @@ Additional Papers. These should not receive a summary in the JSON response:
         interesting_papers = []
         papers_without_content = []
         all_papers = []
+        MAX_TOTAL_PAPERS = 10  # Maximum total papers to include
 
         logger.info(f"Processing {len(feed.entries)} papers from feed {feed_url}")
 
         for entry in feed.entries:
+            # Check if we've reached the maximum number of papers
+            if len(interesting_papers) + len(papers_without_content) >= MAX_TOTAL_PAPERS:
+                logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping paper processing.')
+                break
+
             paper = Paper(
                 title=entry.title,
                 link=entry.link,
@@ -241,13 +247,26 @@ Additional Papers. These should not receive a summary in the JSON response:
         all_interesting_papers = []
         all_papers_without_content = []
         all_available_papers = []
+        MAX_TOTAL_PAPERS = 10  # Maximum total papers to include
 
         for feed_url in feed_urls:
+            # Check if we've reached the maximum number of papers
+            if len(all_interesting_papers) + len(all_papers_without_content) >= MAX_TOTAL_PAPERS:
+                logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping feed processing.')
+                break
+
             interesting_papers, papers_without_content, available_papers = self.process_single_feed(
                 feed_url, title_threshold, abstract_threshold
             )
-            all_interesting_papers.extend(interesting_papers)
-            all_papers_without_content.extend(papers_without_content)
+            
+            # Add papers up to the maximum limit
+            remaining_slots = MAX_TOTAL_PAPERS - (len(all_interesting_papers) + len(all_papers_without_content))
+            if remaining_slots > 0:
+                all_interesting_papers.extend(interesting_papers[:remaining_slots])
+                remaining_slots = MAX_TOTAL_PAPERS - len(all_interesting_papers)
+                if remaining_slots > 0:
+                    all_papers_without_content.extend(papers_without_content[:remaining_slots])
+            
             all_available_papers.extend(available_papers)
 
         logger.info(f'Total papers found across all feeds: {len(all_interesting_papers)} with content, {len(all_papers_without_content)} without')
@@ -266,15 +285,23 @@ Additional Papers. These should not receive a summary in the JSON response:
                 self.processed_papers = set()
                 
                 for feed_url in feed_urls:
+                    # Check if we've reached the maximum number of papers
+                    if len(all_interesting_papers) + len(all_papers_without_content) >= MAX_TOTAL_PAPERS:
+                        logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping threshold adjustment.')
+                        break
+
                     papers_review, ignore_this_1, ignore_this_two = self.process_single_feed(
                         feed_url, title_threshold, abstract_threshold
                     )
                     # Only add papers that aren't already in our lists
                     new_papers = [p for p in papers_review if p not in all_interesting_papers]
-                    all_interesting_papers.extend(new_papers)
+                    
+                    # Add papers up to the maximum limit
+                    remaining_slots = MAX_TOTAL_PAPERS - (len(all_interesting_papers) + len(all_papers_without_content))
+                    if remaining_slots > 0:
+                        all_interesting_papers.extend(new_papers[:remaining_slots])
                     
                     if len(all_interesting_papers) >= 4:
-                        all_interesting_papers = all_interesting_papers[:4]
                         break
                 
                 # Add back the papers from the previous batch to avoid processing them again
