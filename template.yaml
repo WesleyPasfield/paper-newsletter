@@ -45,6 +45,18 @@ Parameters:
     Type: String
     Default: ""
     Description: Email address to send test emails to
+  PreferredLLMProvider:
+    Type: String
+    Default: "claude"
+    AllowedValues:
+      - claude
+      - openai
+    Description: Preferred LLM provider for paper evaluation and newsletter generation
+  OpenAIApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: (Optional) OpenAI API key for multi-LLM support
 
 Conditions:
   CreateDomainIdentity: !Equals 
@@ -71,6 +83,8 @@ Globals:
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
         EMAIL_TEST_MODE: !Ref EmailTestMode
         EMAIL_TEST_ADDRESS: !Ref EmailTestAddress
+        PREFERRED_LLM_PROVIDER: !Ref PreferredLLMProvider
+        OPENAI_API_KEY: !Ref OpenAIApiKey
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
@@ -162,7 +176,9 @@ Resources:
             - Effect: Allow
               Action: 
                 - "secretsmanager:GetSecretValue"
-              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:anthropic/api_key-*"
+              Resource: 
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:anthropic/api_key-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openai_key-*"
             - Effect: Allow
               Action:
                 - ses:SendRawEmail

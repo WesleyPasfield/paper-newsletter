@@ -1,0 +1,6 @@
+[build]
+use_container = true
+parallel = false
+
+[build.parameters]
+use_container = true 

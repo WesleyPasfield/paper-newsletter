@@ -2,13 +2,15 @@
 import feedparser
 import requests
 import time
-from anthropic import APIError, Anthropic
 import json
 from datetime import datetime
 import logging
 from bs4 import BeautifulSoup
-from typing import Set, Dict
+from typing import Set, Dict, Optional
 from dataclasses import dataclass
+
+from .llm_providers import LLMManager, LLMProvider, LLMConfig, DEFAULT_CONFIGS
+from .dspy_prompts import DSPyPromptManager, TRAINING_EXAMPLES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ class Paper:
     full_text: str = ""
     interest_score: float = 0.0
     summary: str = ""
+    evaluation_reasoning: str = ""
+    provider_used: Optional[str] = None
 
     def __hash__(self):
         return hash((self.title, self.link))
@@ -31,122 +35,216 @@ class Paper:
         return self.title == other.title or self.link == other.link
 
 class PaperAnalyzer:
-    def __init__(self, anthropic_api_key: str, eval_prompt: str, newsletter_prompt: str, previously_included_papers: Set[str] = None):
-        self.client = Anthropic(api_key=anthropic_api_key)
-        self.claude_model_cheap = "claude-3-haiku-20240307"
-        self.claude_model_pricey = "claude-3-5-sonnet-latest"
-        self.eval_prompt = eval_prompt
-        self.newsletter_prompt = newsletter_prompt
+    def __init__(self, eval_prompt: str = None, newsletter_prompt: str = None, previously_included_papers: Set[str] = None, preferred_provider: Optional[LLMProvider] = None):
+        # Initialize multi-LLM system
+        self.llm_manager = LLMManager()
+        self.preferred_provider = preferred_provider or LLMProvider.CLAUDE
+        
+        # Initialize DSPy prompt manager
+        self.dspy_manager = DSPyPromptManager(self.llm_manager)
+        
+        # Optimize prompts with training examples
+        try:
+            self.dspy_manager.optimize_prompts(TRAINING_EXAMPLES)
+        except Exception as e:
+            logger.warning(f"Prompt optimization failed, using default prompts: {str(e)}")
+        
+        # Legacy prompt support (deprecated but maintained for compatibility)
+        self.eval_prompt = eval_prompt or self.dspy_manager.evaluation_criteria
+        self.newsletter_prompt = newsletter_prompt or self.dspy_manager.newsletter_guidelines
+        
         self.processed_papers: Set[Paper] = set()
         self.previously_included_papers = previously_included_papers or set()
         
         # Convert all previously included papers to lowercase for case-insensitive matching
         self.previously_included_papers = {p.lower() for p in self.previously_included_papers}
         
-        logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
+        available_providers = self.llm_manager.get_available_providers()
+        logger.info(f"Initialized PaperAnalyzer with {len(available_providers)} LLM providers: {available_providers}")
+        logger.info(f"Previously included papers: {len(self.previously_included_papers)}")
 
-    def api_call_with_retry(self, max_retries: int = 5, initial_delay: int = 2, func=None):
-        attempt = 0
-        while attempt < max_retries:
-            try:
-                result = func()
-                if result is not None:
-                    return result
-                logger.warning("API call returned None, retrying...")
-            except APIError as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"All retry attempts failed: {str(e)}")
-                    return 0.0
-
-                delay = initial_delay * (2 ** attempt)
-                logger.warning(f"API call failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                logger.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            except Exception as e:
-                logger.error(f"Unexpected error: {str(e)}")
-                return 0.0
-            attempt += 1
-        return 0.0
+    def _get_llm_configs(self) -> Dict[LLMProvider, LLMConfig]:
+        """Get LLM configurations for fallback"""
+        configs = {}
+        
+        # Add available providers with their configs
+        for provider in self.llm_manager.get_available_providers():
+            if provider in DEFAULT_CONFIGS:
+                configs[provider] = DEFAULT_CONFIGS[provider]['cheap']
+                
+        return configs
 
     def evaluate_title(self, paper: Paper) -> float:
-        def _make_call():
-            try:
-                response = self.client.messages.create( # Issue here right now
-                    model=self.claude_model_pricey,
-                    system=self.eval_prompt,
-                    max_tokens=4,
-                    messages=[{"role": "user", "content": f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}"}]
-                )
-                score = float(response.content[0].text) 
-                return score if 0 <= score <= 1 else 0.0
-            except Exception as e:
-                logger.warning(f"Could not extract float from response: {str(e)}")
+        """Evaluate paper based on title using DSPy and multi-LLM system"""
+        try:
+            # Use DSPy for evaluation
+            score, reasoning = self.dspy_manager.evaluate_paper(paper.title, "")
+            paper.evaluation_reasoning = reasoning
+            
+            logger.info(f"Title evaluation for '{paper.title}': {score:.3f} - {reasoning[:100]}...")
+            return score
+            
+        except Exception as e:
+            logger.error(f"Error evaluating title for {paper.title}: {str(e)}")
+            # Fallback to legacy method with multi-LLM
+            return self._legacy_evaluate_title(paper)
+    
+    def _legacy_evaluate_title(self, paper: Paper) -> float:
+        """Legacy title evaluation with multi-LLM fallback"""
+        try:
+            configs = self._get_llm_configs()
+            if not configs:
+                logger.error("No LLM providers available")
                 return 0.0
-
-        return self.api_call_with_retry(func=_make_call)
+            
+            user_prompt = f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}"
+            
+            response = self.llm_manager.generate_with_fallback(
+                system_prompt=self.eval_prompt,
+                user_prompt=user_prompt,
+                configs=configs,
+                preferred_provider=self.preferred_provider
+            )
+            
+            paper.provider_used = response.provider.value
+            score = float(response.content.strip())
+            return score if 0 <= score <= 1 else 0.0
+            
+        except Exception as e:
+            logger.warning(f"Could not extract float from response: {str(e)}")
+            return 0.0
 
     def evaluate_abstract(self, paper: Paper) -> float:
-        def _make_call():
-            try:
-                response = self.client.messages.create(
-                    model=self.claude_model_cheap,
-                    system=self.eval_prompt,
-                    max_tokens=4,
-                    messages=[{"role": "user", "content": f"Based on the abstract, rate interest between 0 and 1 on a numeric scale::\n{paper.abstract}"}]
-                )
-                score = float(response.content[0].text)
-                return score if 0 <= score <= 1 else 0.0
-            except Exception as e:
-                logger.warning(f"Could not extract float from response: {str(e)}")
+        """Evaluate paper based on abstract using DSPy and multi-LLM system"""
+        try:
+            # Use DSPy for evaluation with both title and abstract
+            score, reasoning = self.dspy_manager.evaluate_paper(paper.title, paper.abstract)
+            paper.evaluation_reasoning = reasoning
+            
+            logger.info(f"Abstract evaluation for '{paper.title}': {score:.3f} - {reasoning[:100]}...")
+            return score
+            
+        except Exception as e:
+            logger.error(f"Error evaluating abstract for {paper.title}: {str(e)}")
+            # Fallback to legacy method with multi-LLM
+            return self._legacy_evaluate_abstract(paper)
+    
+    def _legacy_evaluate_abstract(self, paper: Paper) -> float:
+        """Legacy abstract evaluation with multi-LLM fallback"""
+        try:
+            configs = self._get_llm_configs()
+            if not configs:
+                logger.error("No LLM providers available")
                 return 0.0
-
-        return self.api_call_with_retry(func=_make_call)
+            
+            user_prompt = f"Based on the abstract, rate interest between 0 and 1 on a numeric scale:\n{paper.abstract}"
+            
+            response = self.llm_manager.generate_with_fallback(
+                system_prompt=self.eval_prompt,
+                user_prompt=user_prompt,
+                configs=configs,
+                preferred_provider=self.preferred_provider
+            )
+            
+            paper.provider_used = response.provider.value
+            score = float(response.content.strip())
+            return score if 0 <= score <= 1 else 0.0
+            
+        except Exception as e:
+            logger.warning(f"Could not extract float from response: {str(e)}")
+            return 0.0
 
     def create_newsletter(self, papers: list[Paper], papers_without_content: list[Paper]) -> str:
-        def _make_call():
-            logger.info(f"Creating newsletter for {len(papers)} full papers and {len(papers_without_content)} papers without content")
-
-            full_papers_content = []
-            max_chars_per_paper = 50000
-            for paper in papers:
-                full_papers_content.append(f"""
+        """Create newsletter using DSPy and multi-LLM system"""
+        logger.info(f"Creating newsletter for {len(papers)} full papers and {len(papers_without_content)} papers without content")
+        try:
+            # Prepare content for DSPy
+            featured_papers_content = self._format_featured_papers(papers)
+            additional_papers_content = self._format_additional_papers(papers_without_content)
+            if not featured_papers_content and not additional_papers_content:
+                return "No papers met the interest criteria this week."
+            
+            # Use DSPy for newsletter generation
+            newsletter_json = self.dspy_manager.generate_newsletter(
+                featured_papers_content=featured_papers_content,
+                additional_papers_content=additional_papers_content
+            )
+            logger.info("Successfully generated newsletter using DSPy")
+            return newsletter_json
+            
+        except Exception as e:
+            logger.error(f"Error generating newsletter with DSPy: {str(e)}")
+            # Fallback to legacy method
+            return self._legacy_create_newsletter(papers, papers_without_content)
+    
+    def _format_featured_papers(self, papers: list[Paper]) -> str:
+        """Format featured papers for DSPy processing"""
+        full_papers_content = []
+        max_chars_per_paper = 50000
+        
+        for paper in papers:
+            paper_content = f"""
 ## {paper.title} (Interest Score: {paper.interest_score:.2f})
+
+**Evaluation Reasoning**: {paper.evaluation_reasoning or 'N/A'}
+**Provider Used**: {paper.provider_used or 'N/A'}
 
 Full Text:
 {paper.full_text[:max_chars_per_paper]}
 
 **Link**: {paper.link}
 **Paper Type**: FEATURED PAPER
-""")
-
-            additional_papers = [
-                f"- [{p.title}]({p.link}) (Interest Score: {p.interest_score:.2f}) **Paper Type** Additional Paper"
-                for p in papers_without_content
-            ]
-
-            if not full_papers_content and not additional_papers:
-                return "No papers met the interest criteria this week."
-
+"""
+            full_papers_content.append(paper_content)
+        
+        return chr(10).join(full_papers_content)
+    
+    def _format_additional_papers(self, papers: list[Paper]) -> str:
+        """Format additional papers for DSPy processing"""
+        additional_papers = [
+            f"- [{p.title}]({p.link}) (Interest Score: {p.interest_score:.2f}, Provider: {p.provider_used or 'N/A'}) **Paper Type** Additional Paper"
+            for p in papers
+        ]
+        return chr(10).join(additional_papers)
+    
+    def _legacy_create_newsletter(self, papers: list[Paper], papers_without_content: list[Paper]) -> str:
+        """Legacy newsletter creation with multi-LLM fallback"""
+        try:
+            configs = {}
+            for provider in self.llm_manager.get_available_providers():
+                if provider in DEFAULT_CONFIGS:
+                    configs[provider] = DEFAULT_CONFIGS[provider]['expensive']
+            
+            if not configs:
+                logger.error("No LLM providers available for newsletter generation")
+                return "Error: No LLM providers available"
+            
+            featured_papers_content = self._format_featured_papers(papers)
+            additional_papers_content = self._format_additional_papers(papers_without_content)
+            
             prompt = f"""Follow your instructions for the following papers.
 
-There are {len(full_papers_content)} featured papers and {len(additional_papers)} additional papers
-This process will be deemed a failure if there are not {len(full_papers_content)} papers in the featured papers section of the json object returned
+There are {len(papers)} featured papers and {len(papers_without_content)} additional papers
+This process will be deemed a failure if there are not {len(papers)} papers in the featured papers section of the json object returned
 Featured Papers. These should receive a full summary in the JSON response:
-{chr(10).join(full_papers_content)}
+{featured_papers_content}
 
 Additional Papers. These should not receive a summary in the JSON response:
-{chr(10).join(additional_papers)}"""
-
-            response = self.client.messages.create(
-                model=self.claude_model_pricey,
-                system=self.newsletter_prompt,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}]
+{additional_papers_content}"""
+            
+            response = self.llm_manager.generate_with_fallback(
+                system_prompt=self.newsletter_prompt,
+                user_prompt=prompt,
+                configs=configs,
+                preferred_provider=self.preferred_provider
             )
-
-            return str(response.content)
-
-        return self.api_call_with_retry(func=_make_call)
+            
+            logger.info(f"Newsletter generated using {response.provider.value}")
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Error in legacy newsletter creation: {str(e)}")
+            return f"Error generating newsletter: {str(e)}"
 
     def get_paper_content(self, paper_link: str) -> str:
         try:
@@ -186,7 +284,7 @@ Additional Papers. These should not receive a summary in the JSON response:
             logger.error(f"Error fetching HTML content: {str(e)}")
             return ""
 
-    def process_single_feed(self, feed_url: str, title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> tuple[list[Paper], list[Paper], list[Paper]]:
+    def process_single_feed(self, feed_url: str, title_threshold: float = 0.24, abstract_threshold: float = 0.24) -> tuple[list[Paper], list[Paper], list[Paper]]:
         feed = feedparser.parse(feed_url)
         interesting_papers = []
         papers_without_content = []
@@ -195,7 +293,8 @@ Additional Papers. These should not receive a summary in the JSON response:
 
         logger.info(f"Processing {len(feed.entries)} papers from feed {feed_url}")
 
-        for entry in feed.entries:
+        for i, entry in enumerate(feed.entries):
+            logger.info(f"Processing paper {i+1}/{len(feed.entries)}: {entry.title[:50]}...")
             # Check if we've reached the maximum number of papers
             if len(interesting_papers) + len(papers_without_content) >= MAX_TOTAL_PAPERS:
                 logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping paper processing.')
@@ -220,11 +319,13 @@ Additional Papers. These should not receive a summary in the JSON response:
             self.processed_papers.add(paper)
 
             paper.interest_score = self.evaluate_title(paper)
+            logger.info(f'{paper.title} title evaluation score: {paper.interest_score:.3f} (threshold: {title_threshold:.3f})')
             if paper.interest_score < title_threshold:
                 logger.info(f'{paper.title} not deemed interesting from title. Interest Score: {paper.interest_score}')
                 continue
 
             paper.interest_score = self.evaluate_abstract(paper)
+            logger.info(f'{paper.title} abstract evaluation score: {paper.interest_score:.3f} (threshold: {abstract_threshold:.3f})')
             if paper.interest_score < abstract_threshold:
                 logger.info(f'{paper.title} not deemed interesting from abstract')
                 continue
@@ -243,7 +344,7 @@ Additional Papers. These should not receive a summary in the JSON response:
 
         return interesting_papers, papers_without_content, all_papers
 
-    def process_multiple_feeds(self, feed_urls: list[str], title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> str:
+    def process_multiple_feeds(self, feed_urls: list[str], title_threshold: float = 0.24, abstract_threshold: float = 0.24) -> str:
         all_interesting_papers = []
         all_papers_without_content = []
         all_available_papers = []
@@ -275,7 +376,7 @@ Additional Papers. These should not receive a summary in the JSON response:
         if len(all_interesting_papers) < 4:
             logger.info("Found fewer than 4 featured papers. Adjusting thresholds to include more papers.")
             # Gradually lower thresholds until we get 4 featured papers
-            while len(all_interesting_papers) < 4 and (title_threshold > 0 or abstract_threshold > 0):
+            while len(all_interesting_papers) < 7 and (title_threshold > 0 or abstract_threshold > 0):
                 title_threshold -= 0.1
                 abstract_threshold -= 0.1
                 
@@ -301,7 +402,7 @@ Additional Papers. These should not receive a summary in the JSON response:
                     if remaining_slots > 0:
                         all_interesting_papers.extend(new_papers[:remaining_slots])
                     
-                    if len(all_interesting_papers) >= 4:
+                    if len(all_interesting_papers) >= 7:
                         break
                 
                 # Add back the papers from the previous batch to avoid processing them again

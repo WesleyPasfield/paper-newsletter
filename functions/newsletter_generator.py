@@ -136,7 +136,6 @@ def get_secret():
 def validate_environment_variables():
     """Validate all required environment variables are present"""
     required_vars = [
-        'ANTHROPIC_API_KEY',
         'SUBSCRIBERS_TABLE',
         'SENDER_EMAIL',
         'NEWSLETTER_BUCKET',
@@ -145,6 +144,11 @@ def validate_environment_variables():
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     if missing_vars:
         raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    # Log available LLM provider configurations
+    logger.info(f"PREFERRED_LLM_PROVIDER: {os.environ.get('PREFERRED_LLM_PROVIDER', 'claude')}")
+    logger.info(f"OPENAI_API_KEY configured: {'Yes' if os.environ.get('OPENAI_API_KEY') else 'No'}")
+    logger.info(f"AWS region: {os.environ.get('AWS_REGION', 'us-west-2')}")
 
 def store_newsletter(json_content: Dict) -> str:
     """Store newsletter content in S3"""
@@ -170,6 +174,7 @@ def store_newsletter(json_content: Dict) -> str:
 def process_newsletter_content(content: str) -> Dict:
     """Process newsletter content returned from API"""
     logger.info("Processing newsletter content")
+    logger.info(f"Content: {content}")
     try:
         # Handle TextBlock formatting if present
         if "TextBlock(text='" in content:
@@ -347,17 +352,28 @@ def lambda_handler(event, context):
         start_time = datetime.now()
         logger.info(f"Starting newsletter generation at {start_time}")
         
-        anthropic_api_key = get_secret()
-        
         # Get previously included papers first
         previously_included = get_previously_included_papers()
         logger.info(f"Found {len(previously_included)} previously included papers")
         
+        # Get preferred LLM provider from environment
+        preferred_provider = os.environ.get('PREFERRED_LLM_PROVIDER', 'claude').lower()
+        from .llm_providers import LLMProvider
+        
+        provider_map = {
+            'claude': LLMProvider.CLAUDE,
+            'openai': LLMProvider.OPENAI
+        }
+        
+        preferred_llm = provider_map.get(preferred_provider, LLMProvider.CLAUDE)
+        logger.info(f"Using preferred LLM provider: {preferred_llm}")
+        
+        # Initialize new PaperAnalyzer with multi-LLM support
         analyzer = PaperAnalyzer(
-            anthropic_api_key=anthropic_api_key,
-            eval_prompt=EVAL_PROMPT,
-            newsletter_prompt=NEWSLETTER_PROMPT,
-            previously_included_papers=previously_included
+            eval_prompt=EVAL_PROMPT,  # Optional fallback prompt
+            newsletter_prompt=NEWSLETTER_PROMPT,  # Optional fallback prompt
+            previously_included_papers=previously_included,
+            preferred_provider=preferred_llm
         )
         
         # Initial feed sources
@@ -374,6 +390,7 @@ def lambda_handler(event, context):
         
         logger.info("Starting paper analysis and newsletter generation")
         newsletter_content = analyzer.process_multiple_feeds(feed_urls)
+        logger.info(f"Newsletter content: {newsletter_content}")
         
         try:
             json_content = process_newsletter_content(newsletter_content)

@@ -1,0 +1,10 @@
+anthropic>=0.40.0
+beautifulsoup4>=4.12.3
+feedparser>=6.0.11
+requests>=2.32.3
+openai>=1.54.3
+boto3>=1.35.65
+botocore>=1.35.65
+dspy-ai>=2.4.8
+numpy>=1.21.0,<2.0.0
+pyarrow>=10.0.0,<15.0.0 
