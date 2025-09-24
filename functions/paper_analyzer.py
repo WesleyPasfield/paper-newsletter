@@ -2,12 +2,14 @@
 import feedparser
 import requests
 import time
+import random
+import math
 from anthropic import APIError, Anthropic
 import json
 from datetime import datetime
 import logging
 from bs4 import BeautifulSoup
-from typing import Set, Dict
+from typing import Set, Dict, Optional
 from dataclasses import dataclass
 
 logging.basicConfig(level=logging.INFO)
@@ -43,30 +45,166 @@ class PaperAnalyzer:
         # Convert all previously included papers to lowercase for case-insensitive matching
         self.previously_included_papers = {p.lower() for p in self.previously_included_papers}
         
+        # Rate limiting state
+        self.last_api_call_time = 0.0
+        self.min_api_interval = 0.1  # Minimum 100ms between API calls
+        self.recent_rate_limit_failures = 0  # Track recent rate limit failures
+        
         logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
 
-    def api_call_with_retry(self, max_retries: int = 5, initial_delay: int = 2, func=None):
+    def _enforce_rate_limit(self):
+        """Enforce minimum interval between API calls to avoid hitting rate limits."""
+        current_time = time.time()
+        time_since_last_call = current_time - self.last_api_call_time
+        
+        # Increase interval if we've had recent rate limit failures
+        adaptive_interval = self.min_api_interval * (1 + self.recent_rate_limit_failures * 0.5)
+        
+        if time_since_last_call < adaptive_interval:
+            sleep_time = adaptive_interval - time_since_last_call
+            logger.debug(f"Rate limiting: sleeping {sleep_time:.3f} seconds (adaptive interval: {adaptive_interval:.3f}s)")
+            time.sleep(sleep_time)
+        
+        self.last_api_call_time = time.time()
+
+    def _classify_error(self, error: APIError) -> str:
+        """Classify API errors for better handling and logging."""
+        if hasattr(error, 'response') and error.response is not None:
+            status_code = getattr(error.response, 'status_code', None)
+            if status_code == 429:
+                return "rate_limit"
+            elif status_code == 401:
+                return "authentication"
+            elif status_code == 403:
+                return "authorization"
+            elif 400 <= status_code < 500:
+                return "client_error"
+            elif 500 <= status_code < 600:
+                return "server_error"
+        
+        # Check error message for common patterns
+        error_msg = str(error).lower()
+        if "rate limit" in error_msg or "too many requests" in error_msg:
+            return "rate_limit"
+        elif "unauthorized" in error_msg or "invalid api key" in error_msg:
+            return "authentication"
+        elif "forbidden" in error_msg:
+            return "authorization"
+        
+        return "unknown"
+
+    def api_call_with_retry(self, max_retries: int = 5, initial_delay: float = 1.0, func=None):
+        """
+        Enhanced retry mechanism with exponential backoff, jitter, and specific 429 handling.
+        
+        Args:
+            max_retries: Maximum number of retry attempts
+            initial_delay: Initial delay in seconds (will be used as base for exponential backoff)
+            func: Function to execute with retries
+        """
         attempt = 0
         while attempt < max_retries:
             try:
+                # Enforce rate limiting before each API call
+                self._enforce_rate_limit()
+                
                 result = func()
                 if result is not None:
+                    # Reset rate limit failure count on successful calls
+                    self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
                     return result
                 logger.warning("API call returned None, retrying...")
             except APIError as e:
+                error_type = self._classify_error(e)
+                
+                # Track rate limit failures for adaptive rate limiting
+                if error_type == "rate_limit":
+                    self.recent_rate_limit_failures += 1
+                    # Decay the failure count over time (reset after 10 successful calls)
+                    if self.recent_rate_limit_failures > 10:
+                        self.recent_rate_limit_failures = 10
+                else:
+                    # Reset failure count on non-rate-limit errors
+                    self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
+                
+                # Don't retry certain types of errors
+                if error_type in ["authentication", "authorization"]:
+                    logger.error(f"Non-retryable error ({error_type}): {str(e)}")
+                    return 0.0
+                
                 if attempt == max_retries - 1:
-                    logger.error(f"All retry attempts failed: {str(e)}")
+                    logger.error(f"All retry attempts failed ({error_type}): {str(e)}")
                     return 0.0
 
-                delay = initial_delay * (2 ** attempt)
-                logger.warning(f"API call failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                logger.info(f"Retrying in {delay} seconds...")
+                # Calculate delay with exponential backoff and jitter
+                delay = self._calculate_retry_delay(attempt, initial_delay, e)
+                
+                logger.warning(f"API call failed (attempt {attempt + 1}/{max_retries}, {error_type}): {str(e)}")
+                logger.info(f"Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
             except Exception as e:
                 logger.error(f"Unexpected error: {str(e)}")
                 return 0.0
             attempt += 1
         return 0.0
+
+    def _calculate_retry_delay(self, attempt: int, base_delay: float, error: APIError) -> float:
+        """
+        Calculate retry delay with exponential backoff, jitter, and special handling for 429 errors.
+        
+        Args:
+            attempt: Current attempt number (0-based)
+            base_delay: Base delay in seconds
+            error: The APIError that occurred
+            
+        Returns:
+            Delay in seconds before next retry
+        """
+        # Check if this is a 429 (Too Many Requests) error and parse headers
+        is_rate_limit = False
+        retry_after = None
+        
+        if hasattr(error, 'response') and error.response is not None:
+            status_code = getattr(error.response, 'status_code', None)
+            is_rate_limit = status_code == 429
+            
+            # Try to parse Retry-After header for more intelligent backoff
+            if is_rate_limit:
+                headers = getattr(error.response, 'headers', {})
+                retry_after_header = headers.get('Retry-After') or headers.get('retry-after')
+                if retry_after_header:
+                    try:
+                        retry_after = int(retry_after_header)
+                        logger.info(f"Rate limit response includes Retry-After: {retry_after} seconds")
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not parse Retry-After header: {retry_after_header}")
+        
+        # For 429 errors, use longer base delay and more aggressive backoff
+        if is_rate_limit:
+            base_delay = max(base_delay, 5.0)  # Minimum 5 seconds for rate limits
+            logger.warning("Rate limit detected (429), using extended backoff")
+            
+            # If we have a Retry-After header, use it as the base delay
+            if retry_after is not None:
+                base_delay = max(base_delay, retry_after)
+                logger.info(f"Using Retry-After header value: {retry_after} seconds")
+        
+        # Exponential backoff: base_delay * (2^attempt)
+        exponential_delay = base_delay * (2 ** attempt)
+        
+        # Add jitter to prevent thundering herd (random factor between 0.5 and 1.5)
+        jitter_factor = random.uniform(0.5, 1.5)
+        jittered_delay = exponential_delay * jitter_factor
+        
+        # Cap the maximum delay to prevent extremely long waits
+        max_delay = 300  # 5 minutes maximum
+        final_delay = min(jittered_delay, max_delay)
+        
+        # For rate limits, ensure minimum delay even on first retry
+        if is_rate_limit:
+            final_delay = max(final_delay, 10.0)
+        
+        return final_delay
 
     def evaluate_title(self, paper: Paper) -> float:
         def _make_call():
