@@ -35,8 +35,13 @@ class Paper:
 class PaperAnalyzer:
     def __init__(self, anthropic_api_key: str, eval_prompt: str, newsletter_prompt: str, previously_included_papers: Set[str] = None):
         self.client = Anthropic(api_key=anthropic_api_key)
-        self.claude_model_cheap = "claude-3-haiku-20240307"
-        self.claude_model_pricey = "claude-3-5-sonnet-latest"
+        self.claude_model_cheap = "claude-3-5-haiku-20241022"  # Updated to latest Haiku
+        self.claude_model_pricey = "claude-sonnet-4-20250514"  # Updated to Sonnet 4
+        self.claude_model_fallback = "claude-3-5-haiku-20241022"  # Fallback to latest Haiku when rate limited
+        self.claude_model_emergency = "claude-3-haiku-20240307"  # Emergency fallback to older Haiku
+        
+        # Track fallback level: 0=normal, 1=fallback, 2=emergency
+        self.fallback_level = 0
         self.eval_prompt = eval_prompt
         self.newsletter_prompt = newsletter_prompt
         self.processed_papers: Set[Paper] = set()
@@ -56,6 +61,32 @@ class PaperAnalyzer:
             logger.info(f"Sample previously included papers: {list(self.previously_included_papers)[:5]}")
         else:
             logger.info("No previously included papers found - all papers should be processed")
+
+    def _switch_to_fallback_models(self):
+        """Switch to fallback models when rate limits are hit"""
+        if self.fallback_level == 0:
+            self.fallback_level = 1
+            logger.warning("Switching to fallback models due to rate limiting")
+            logger.info(f"Using fallback model: {self.claude_model_fallback} for all operations")
+        elif self.fallback_level == 1:
+            self.fallback_level = 2
+            logger.warning("Switching to emergency fallback models due to continued rate limiting")
+            logger.info(f"Using emergency model: {self.claude_model_emergency} for all operations")
+    
+    def _get_current_model(self, is_expensive_operation: bool = False) -> str:
+        """Get the current model based on fallback level and operation type"""
+        if self.fallback_level == 0:
+            # Normal operation
+            model = self.claude_model_pricey if is_expensive_operation else self.claude_model_cheap
+        elif self.fallback_level == 1:
+            # First fallback - use latest Haiku for everything
+            model = self.claude_model_fallback
+        else:
+            # Emergency fallback - use oldest Haiku for everything
+            model = self.claude_model_emergency
+        
+        logger.debug(f"Using model: {model} (fallback level: {self.fallback_level})")
+        return model
 
     def _enforce_rate_limit(self):
         """Enforce minimum interval between API calls to avoid hitting rate limits."""
@@ -138,6 +169,8 @@ class PaperAnalyzer:
                     self.input_token_acceleration_limit = True
                     self.recent_rate_limit_failures += 3  # More aggressive for input token limits
                     logger.warning("Input token acceleration limit detected - using extended backoff")
+                    # Switch to fallback models to reduce token usage
+                    self._switch_to_fallback_models()
                 else:
                     # Reset failure count on non-rate-limit errors
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
@@ -239,8 +272,11 @@ class PaperAnalyzer:
     def evaluate_title(self, paper: Paper) -> float:
         def _make_call():
             try:
-                response = self.client.messages.create( # Issue here right now
-                    model=self.claude_model_pricey,
+                # Use appropriate model based on fallback level
+                model = self._get_current_model(is_expensive_operation=True)
+                
+                response = self.client.messages.create(
+                    model=model,
                     system=self.eval_prompt,
                     max_tokens=4,
                     messages=[{"role": "user", "content": f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}"}]
@@ -256,8 +292,11 @@ class PaperAnalyzer:
     def evaluate_abstract(self, paper: Paper) -> float:
         def _make_call():
             try:
+                # Use appropriate model based on fallback level
+                model = self._get_current_model(is_expensive_operation=False)
+                
                 response = self.client.messages.create(
-                    model=self.claude_model_cheap,
+                    model=model,
                     system=self.eval_prompt,
                     max_tokens=4,
                     messages=[{"role": "user", "content": f"Based on the abstract, rate interest between 0 and 1 on a numeric scale::\n{paper.abstract}"}]
@@ -305,8 +344,11 @@ Featured Papers. These should receive a full summary in the JSON response:
 Additional Papers. These should not receive a summary in the JSON response:
 {chr(10).join(additional_papers)}"""
 
+            # Use appropriate model based on fallback level
+            model = self._get_current_model(is_expensive_operation=True)
+            
             response = self.client.messages.create(
-                model=self.claude_model_pricey,
+                model=model,
                 system=self.newsletter_prompt,
                 max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}]
@@ -377,7 +419,14 @@ Additional Papers. These should not receive a summary in the JSON response:
         interesting_papers = []
         papers_without_content = []
         all_papers = []
-        MAX_TOTAL_PAPERS = 10  # Maximum total papers to include
+        
+        # Reduce paper limit based on fallback level
+        if self.fallback_level == 0:
+            MAX_TOTAL_PAPERS = 10
+        elif self.fallback_level == 1:
+            MAX_TOTAL_PAPERS = 5
+        else:
+            MAX_TOTAL_PAPERS = 3
 
         logger.info(f"Processing {len(feed.entries)} papers from feed {feed_url}")
 
@@ -448,7 +497,14 @@ Additional Papers. These should not receive a summary in the JSON response:
         all_interesting_papers = []
         all_papers_without_content = []
         all_available_papers = []
-        MAX_TOTAL_PAPERS = 10  # Maximum total papers to include
+        
+        # Reduce paper limit based on fallback level
+        if self.fallback_level == 0:
+            MAX_TOTAL_PAPERS = 10
+        elif self.fallback_level == 1:
+            MAX_TOTAL_PAPERS = 5
+        else:
+            MAX_TOTAL_PAPERS = 3
 
         for feed_url in feed_urls:
             # Check if we've reached the maximum number of papers
