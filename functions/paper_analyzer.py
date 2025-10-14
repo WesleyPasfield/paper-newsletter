@@ -52,6 +52,10 @@ class PaperAnalyzer:
         self.input_token_acceleration_limit = False  # Track if we hit input token acceleration limit
         
         logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
+        if len(self.previously_included_papers) > 0:
+            logger.info(f"Sample previously included papers: {list(self.previously_included_papers)[:5]}")
+        else:
+            logger.info("No previously included papers found - all papers should be processed")
 
     def _enforce_rate_limit(self):
         """Enforce minimum interval between API calls to avoid hitting rate limits."""
@@ -390,13 +394,20 @@ Additional Papers. These should not receive a summary in the JSON response:
             )
             
             # Check if paper is in previously included papers
-            if paper.title.lower() in self.previously_included_papers or paper.link.lower() in self.previously_included_papers:
+            title_lower = paper.title.lower()
+            link_lower = paper.link.lower()
+            
+            if title_lower in self.previously_included_papers or link_lower in self.previously_included_papers:
                 logger.info(f'Skipping previously included paper: {paper.title}')
+                logger.info(f'  Title match: {title_lower in self.previously_included_papers}')
+                logger.info(f'  Link match: {link_lower in self.previously_included_papers}')
+                logger.info(f'  Previously included count: {len(self.previously_included_papers)}')
                 continue
             
             # Check if paper was already processed in this run
             if paper in self.processed_papers:
                 logger.info(f'Skipping duplicate paper within current run: {paper.title}')
+                logger.info(f'  Processed papers count: {len(self.processed_papers)}')
                 continue
             
             self.processed_papers.add(paper)

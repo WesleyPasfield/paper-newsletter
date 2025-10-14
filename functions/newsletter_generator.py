@@ -279,6 +279,8 @@ def get_previously_included_papers() -> Set[str]:
                 continue
         
         logger.info(f"Found {len(previously_included)} previously included paper titles/links")
+        if len(previously_included) > 0:
+            logger.info(f"Sample previously included papers: {list(previously_included)[:5]}")
         return previously_included
         
     except Exception as e:
