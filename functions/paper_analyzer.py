@@ -49,6 +49,7 @@ class PaperAnalyzer:
         self.last_api_call_time = 0.0
         self.min_api_interval = 0.1  # Minimum 100ms between API calls
         self.recent_rate_limit_failures = 0  # Track recent rate limit failures
+        self.input_token_acceleration_limit = False  # Track if we hit input token acceleration limit
         
         logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
 
@@ -59,6 +60,10 @@ class PaperAnalyzer:
         
         # Increase interval if we've had recent rate limit failures
         adaptive_interval = self.min_api_interval * (1 + self.recent_rate_limit_failures * 0.5)
+        
+        # If we've hit input token acceleration limits, be much more conservative
+        if self.input_token_acceleration_limit:
+            adaptive_interval = max(adaptive_interval, 5.0)  # Minimum 5 seconds between calls
         
         if time_since_last_call < adaptive_interval:
             sleep_time = adaptive_interval - time_since_last_call
@@ -86,6 +91,8 @@ class PaperAnalyzer:
         error_msg = str(error).lower()
         if "rate limit" in error_msg or "too many requests" in error_msg:
             return "rate_limit"
+        elif "input tokens" in error_msg and "acceleration" in error_msg:
+            return "input_token_acceleration"
         elif "unauthorized" in error_msg or "invalid api key" in error_msg:
             return "authentication"
         elif "forbidden" in error_msg:
@@ -123,6 +130,10 @@ class PaperAnalyzer:
                     # Decay the failure count over time (reset after 10 successful calls)
                     if self.recent_rate_limit_failures > 10:
                         self.recent_rate_limit_failures = 10
+                elif error_type == "input_token_acceleration":
+                    self.input_token_acceleration_limit = True
+                    self.recent_rate_limit_failures += 3  # More aggressive for input token limits
+                    logger.warning("Input token acceleration limit detected - using extended backoff")
                 else:
                     # Reset failure count on non-rate-limit errors
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
@@ -162,6 +173,7 @@ class PaperAnalyzer:
         """
         # Check if this is a 429 (Too Many Requests) error and parse headers
         is_rate_limit = False
+        is_input_token_acceleration = False
         retry_after = None
         
         if hasattr(error, 'response') and error.response is not None:
@@ -179,6 +191,11 @@ class PaperAnalyzer:
                     except (ValueError, TypeError):
                         logger.warning(f"Could not parse Retry-After header: {retry_after_header}")
         
+        # Check for input token acceleration limit in error message
+        error_msg = str(error).lower()
+        if "input tokens" in error_msg and "acceleration" in error_msg:
+            is_input_token_acceleration = True
+        
         # For 429 errors, use longer base delay and more aggressive backoff
         if is_rate_limit:
             base_delay = max(base_delay, 5.0)  # Minimum 5 seconds for rate limits
@@ -188,6 +205,11 @@ class PaperAnalyzer:
             if retry_after is not None:
                 base_delay = max(base_delay, retry_after)
                 logger.info(f"Using Retry-After header value: {retry_after} seconds")
+        
+        # For input token acceleration limits, use much more aggressive backoff
+        if is_input_token_acceleration:
+            base_delay = max(base_delay, 60.0)  # Minimum 60 seconds for input token acceleration
+            logger.warning("Input token acceleration limit detected, using very extended backoff")
         
         # Exponential backoff: base_delay * (2^attempt)
         exponential_delay = base_delay * (2 ** attempt)
@@ -203,6 +225,10 @@ class PaperAnalyzer:
         # For rate limits, ensure minimum delay even on first retry
         if is_rate_limit:
             final_delay = max(final_delay, 10.0)
+        
+        # For input token acceleration limits, use much longer minimum delays
+        if is_input_token_acceleration:
+            final_delay = max(final_delay, 120.0)  # Minimum 2 minutes for input token acceleration
         
         return final_delay
 
@@ -284,7 +310,25 @@ Additional Papers. These should not receive a summary in the JSON response:
 
             return str(response.content)
 
-        return self.api_call_with_retry(func=_make_call)
+        result = self.api_call_with_retry(func=_make_call)
+        
+        # Ensure we always return a string, even if API call fails
+        if isinstance(result, (int, float)) and result == 0.0:
+            logger.error("Newsletter creation failed due to API errors, returning fallback content")
+            return json.dumps({
+                "overview": "Unable to generate newsletter content due to API rate limiting. Please try again later.",
+                "featured_papers": [],
+                "additional_papers": [],
+                "metadata": {
+                    "generated_date": datetime.now().strftime('%Y-%m-%d'),
+                    "total_papers_analyzed": 0,
+                    "featured_papers_count": 0,
+                    "additional_papers_count": 0,
+                    "error": "API rate limiting prevented newsletter generation"
+                }
+            })
+        
+        return result
 
     def get_paper_content(self, paper_link: str) -> str:
         try:
