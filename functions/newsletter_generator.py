@@ -177,8 +177,23 @@ def process_newsletter_content(content: str) -> Dict:
             content = content.split("', type='text", 1)[0]
             content = codecs.escape_decode(content)[0].decode('utf-8')
         
+        # Handle markdown code blocks (```json ... ```)
+        if content.strip().startswith('```json'):
+            # Extract JSON from markdown code block
+            lines = content.strip().split('\n')
+            # Remove first line (```json) and last line (```)
+            json_lines = lines[1:-1] if lines[-1].strip() == '```' else lines[1:]
+            content = '\n'.join(json_lines)
+            logger.info("Extracted JSON from markdown code block")
+        elif content.strip().startswith('```'):
+            # Handle generic code blocks
+            lines = content.strip().split('\n')
+            json_lines = lines[1:-1] if lines[-1].strip() == '```' else lines[1:]
+            content = '\n'.join(json_lines)
+            logger.info("Extracted JSON from generic code block")
+        
         # Parse JSON from the string
-    
+        logger.info(f"Attempting to parse JSON content (first 200 chars): {content[:200]}...")
         newsletter_data = json.loads(content)
         
         # Initialize missing sections if they don't exist
