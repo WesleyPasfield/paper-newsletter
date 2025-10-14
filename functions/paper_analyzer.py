@@ -401,7 +401,15 @@ Additional Papers. These should not receive a summary in the JSON response:
                 logger.info(f'Skipping previously included paper: {paper.title}')
                 logger.info(f'  Title match: {title_lower in self.previously_included_papers}')
                 logger.info(f'  Link match: {link_lower in self.previously_included_papers}')
+                logger.info(f'  Paper link: {paper.link}')
+                logger.info(f'  Paper link (lower): {link_lower}')
                 logger.info(f'  Previously included count: {len(self.previously_included_papers)}')
+                
+                # Show what links are actually in the set
+                if link_lower in self.previously_included_papers:
+                    matching_links = [p for p in self.previously_included_papers if link_lower in p or p in link_lower]
+                    logger.info(f'  Matching links in set: {matching_links[:3]}')
+                
                 continue
             
             # Check if paper was already processed in this run

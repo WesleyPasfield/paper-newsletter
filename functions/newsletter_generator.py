@@ -247,10 +247,16 @@ def get_previously_included_papers() -> Set[str]:
             logger.info("No previous newsletters found in S3")
             return set()
         
+        # Log what files are being processed
+        files = response.get('Contents', [])
+        logger.info(f"Found {len(files)} newsletter files in S3")
+        for obj in files[:5]:  # Show first 5 files
+            logger.info(f"  Processing file: {obj['Key']} (modified: {obj['LastModified']})")
+        
         # Track all paper titles and links we've seen before
         previously_included = set()
         
-        for obj in response.get('Contents', []):
+        for obj in files:
             try:
                 # Get the newsletter JSON file
                 file_response = s3_client.get_object(
@@ -281,6 +287,9 @@ def get_previously_included_papers() -> Set[str]:
         logger.info(f"Found {len(previously_included)} previously included paper titles/links")
         if len(previously_included) > 0:
             logger.info(f"Sample previously included papers: {list(previously_included)[:5]}")
+            # Show any links specifically
+            links = [p for p in previously_included if p.startswith('http')]
+            logger.info(f"Sample links in previously included: {links[:3]}")
         return previously_included
         
     except Exception as e:
