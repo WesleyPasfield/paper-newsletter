@@ -674,12 +674,28 @@ def lambda_handler(event, context):
         # Get previously included papers first
         previously_included = get_previously_included_papers()
         logger.info(f"Found {len(previously_included)} previously included papers")
-        
+
+        # Get model configurations from environment variables (with defaults)
+        model_cheap = os.environ.get('CLAUDE_MODEL_CHEAP')
+        model_expensive = os.environ.get('CLAUDE_MODEL_EXPENSIVE')
+        model_fallback = os.environ.get('CLAUDE_MODEL_FALLBACK')
+        model_emergency = os.environ.get('CLAUDE_MODEL_EMERGENCY')
+
+        logger.info(f"Model configuration from environment: "
+                   f"Cheap={model_cheap or 'default'}, "
+                   f"Expensive={model_expensive or 'default'}, "
+                   f"Fallback={model_fallback or 'default'}, "
+                   f"Emergency={model_emergency or 'default'}")
+
         analyzer = PaperAnalyzer(
             anthropic_api_key=anthropic_api_key,
             eval_prompt=EVAL_PROMPT,
             newsletter_prompt=NEWSLETTER_PROMPT,
-            previously_included_papers=previously_included
+            previously_included_papers=previously_included,
+            model_cheap=model_cheap,
+            model_expensive=model_expensive,
+            model_fallback=model_fallback,
+            model_emergency=model_emergency
         )
         
         # Initial feed sources

@@ -154,12 +154,42 @@ class Paper:
         return self.title == other.title or self.link == other.link
 
 class PaperAnalyzer:
-    def __init__(self, anthropic_api_key: str, eval_prompt: str, newsletter_prompt: str, previously_included_papers: Set[str] = None):
+    def __init__(
+        self,
+        anthropic_api_key: str,
+        eval_prompt: str,
+        newsletter_prompt: str,
+        previously_included_papers: Set[str] = None,
+        model_cheap: Optional[str] = None,
+        model_expensive: Optional[str] = None,
+        model_fallback: Optional[str] = None,
+        model_emergency: Optional[str] = None
+    ):
+        """
+        Initialize PaperAnalyzer with configurable Claude models.
+
+        Args:
+            anthropic_api_key: Anthropic API key
+            eval_prompt: Prompt for evaluating papers
+            newsletter_prompt: Prompt for generating newsletter
+            previously_included_papers: Set of previously included paper titles/links
+            model_cheap: Model for cheap operations (default: claude-haiku-4-5-20251001)
+            model_expensive: Model for expensive operations (default: claude-sonnet-4-5-20250929)
+            model_fallback: Fallback model when rate limited (default: claude-3-7-sonnet-20250219)
+            model_emergency: Emergency fallback model (default: claude-3-haiku-20240307)
+        """
         self.client = Anthropic(api_key=anthropic_api_key)
-        self.claude_model_cheap = "claude-3-5-haiku-20241022"  # Updated to latest Haiku
-        self.claude_model_pricey = "claude-sonnet-4-20250514"  # Updated to Sonnet 4
-        self.claude_model_fallback = "claude-3-5-haiku-20241022"  # Fallback to latest Haiku when rate limited
-        self.claude_model_emergency = "claude-3-haiku-20240307"  # Emergency fallback to older Haiku
+
+        # Set models with defaults if not provided
+        self.claude_model_cheap = model_cheap or "claude-haiku-4-5-20251001"
+        self.claude_model_pricey = model_expensive or "claude-sonnet-4-5-20250929"
+        self.claude_model_fallback = model_fallback or "claude-3-7-sonnet-20250219"
+        self.claude_model_emergency = model_emergency or "claude-3-haiku-20240307"
+
+        logger.info(f"Initialized with models - Cheap: {self.claude_model_cheap}, "
+                   f"Expensive: {self.claude_model_pricey}, "
+                   f"Fallback: {self.claude_model_fallback}, "
+                   f"Emergency: {self.claude_model_emergency}")
 
         # Track fallback level: 0=normal, 1=fallback, 2=emergency
         self.fallback_level = 0
