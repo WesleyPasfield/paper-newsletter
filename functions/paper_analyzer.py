@@ -11,9 +11,130 @@ import logging
 from bs4 import BeautifulSoup
 from typing import Set, Dict, Optional
 from dataclasses import dataclass
+from enum import Enum
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class CircuitState(Enum):
+    """Circuit breaker states"""
+    CLOSED = "closed"  # Normal operation
+    OPEN = "open"      # Failing, stop trying
+    HALF_OPEN = "half_open"  # Testing if service recovered
+
+@dataclass
+class RateLimitMetrics:
+    """Track rate limiting metrics"""
+    total_requests: int = 0
+    successful_requests: int = 0
+    rate_limit_errors: int = 0
+    other_errors: int = 0
+    circuit_breaker_trips: int = 0
+
+    def success_rate(self) -> float:
+        """Calculate success rate"""
+        if self.total_requests == 0:
+            return 1.0
+        return self.successful_requests / self.total_requests
+
+class TokenBucket:
+    """Token bucket algorithm for rate limiting"""
+    def __init__(self, rate: float, capacity: float):
+        """
+        Args:
+            rate: Tokens added per second
+            capacity: Maximum tokens in bucket
+        """
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.time()
+
+    def consume(self, tokens: float = 1.0) -> bool:
+        """
+        Try to consume tokens. Returns True if successful.
+        """
+        self._refill()
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
+
+    def _refill(self):
+        """Refill tokens based on time elapsed"""
+        now = time.time()
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        self.last_update = now
+
+    def wait_time(self, tokens: float = 1.0) -> float:
+        """Calculate how long to wait for tokens to be available"""
+        self._refill()
+        if self.tokens >= tokens:
+            return 0.0
+        tokens_needed = tokens - self.tokens
+        return tokens_needed / self.rate
+
+class CircuitBreaker:
+    """Circuit breaker pattern for API calls"""
+    def __init__(self, failure_threshold: int = 5, timeout: float = 60.0, half_open_attempts: int = 1):
+        """
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            timeout: Seconds to wait before trying again (OPEN -> HALF_OPEN)
+            half_open_attempts: Number of test requests in HALF_OPEN state
+        """
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout
+        self.half_open_attempts = half_open_attempts
+
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = 0.0
+        self.half_open_success_count = 0
+
+    def call_allowed(self) -> bool:
+        """Check if calls are allowed in current state"""
+        if self.state == CircuitState.CLOSED:
+            return True
+        elif self.state == CircuitState.OPEN:
+            # Check if timeout has passed
+            if time.time() - self.last_failure_time >= self.timeout:
+                logger.info("Circuit breaker transitioning to HALF_OPEN state")
+                self.state = CircuitState.HALF_OPEN
+                self.half_open_success_count = 0
+                return True
+            return False
+        else:  # HALF_OPEN
+            return True
+
+    def record_success(self):
+        """Record successful API call"""
+        if self.state == CircuitState.HALF_OPEN:
+            self.half_open_success_count += 1
+            if self.half_open_success_count >= self.half_open_attempts:
+                logger.info("Circuit breaker transitioning to CLOSED state")
+                self.state = CircuitState.CLOSED
+                self.failure_count = 0
+        elif self.state == CircuitState.CLOSED:
+            # Gradually decrease failure count on success
+            self.failure_count = max(0, self.failure_count - 1)
+
+    def record_failure(self, is_rate_limit: bool = False):
+        """Record failed API call"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        # Rate limit errors are more serious - count them double
+        if is_rate_limit:
+            self.failure_count += 1
+
+        if self.state == CircuitState.HALF_OPEN:
+            logger.warning("Circuit breaker reopening due to failure in HALF_OPEN state")
+            self.state = CircuitState.OPEN
+        elif self.failure_count >= self.failure_threshold:
+            logger.warning(f"Circuit breaker opening after {self.failure_count} failures")
+            self.state = CircuitState.OPEN
 
 @dataclass
 class Paper:
@@ -39,24 +160,39 @@ class PaperAnalyzer:
         self.claude_model_pricey = "claude-sonnet-4-20250514"  # Updated to Sonnet 4
         self.claude_model_fallback = "claude-3-5-haiku-20241022"  # Fallback to latest Haiku when rate limited
         self.claude_model_emergency = "claude-3-haiku-20240307"  # Emergency fallback to older Haiku
-        
+
         # Track fallback level: 0=normal, 1=fallback, 2=emergency
         self.fallback_level = 0
         self.eval_prompt = eval_prompt
         self.newsletter_prompt = newsletter_prompt
         self.processed_papers: Set[Paper] = set()
         self.previously_included_papers = previously_included_papers or set()
-        
+
         # Convert all previously included papers to lowercase for case-insensitive matching
         self.previously_included_papers = {p.lower() for p in self.previously_included_papers}
-        
-        # Rate limiting state
+
+        # Enhanced rate limiting with token bucket
+        # Start conservative: 5 requests per second, burst capacity of 10
+        self.token_bucket = TokenBucket(rate=5.0, capacity=10.0)
+
+        # Circuit breaker to stop trying if we keep failing
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            timeout=60.0,
+            half_open_attempts=1
+        )
+
+        # Metrics tracking
+        self.metrics = RateLimitMetrics()
+
+        # Legacy rate limiting state (kept for compatibility)
         self.last_api_call_time = 0.0
         self.min_api_interval = 0.1  # Minimum 100ms between API calls
         self.recent_rate_limit_failures = 0  # Track recent rate limit failures
         self.input_token_acceleration_limit = False  # Track if we hit input token acceleration limit
-        
+
         logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
+        logger.info(f"Rate limiting: {self.token_bucket.rate} req/sec, capacity: {self.token_bucket.capacity}")
         if len(self.previously_included_papers) > 0:
             logger.info(f"Sample previously included papers: {list(self.previously_included_papers)[:5]}")
         else:
@@ -89,22 +225,30 @@ class PaperAnalyzer:
         return model
 
     def _enforce_rate_limit(self):
-        """Enforce minimum interval between API calls to avoid hitting rate limits."""
+        """Enforce rate limiting using token bucket algorithm."""
+        # Use token bucket for precise rate limiting
+        if not self.token_bucket.consume(1.0):
+            wait_time = self.token_bucket.wait_time(1.0)
+            logger.debug(f"Rate limiting: waiting {wait_time:.3f} seconds for token bucket")
+            time.sleep(wait_time)
+            self.token_bucket.consume(1.0)
+
+        # Additional legacy rate limiting for safety
         current_time = time.time()
         time_since_last_call = current_time - self.last_api_call_time
-        
+
         # Increase interval if we've had recent rate limit failures
         adaptive_interval = self.min_api_interval * (1 + self.recent_rate_limit_failures * 0.5)
-        
+
         # If we've hit input token acceleration limits, be much more conservative
         if self.input_token_acceleration_limit:
             adaptive_interval = max(adaptive_interval, 5.0)  # Minimum 5 seconds between calls
-        
+
         if time_since_last_call < adaptive_interval:
             sleep_time = adaptive_interval - time_since_last_call
-            logger.debug(f"Rate limiting: sleeping {sleep_time:.3f} seconds (adaptive interval: {adaptive_interval:.3f}s)")
+            logger.debug(f"Rate limiting: additional sleep {sleep_time:.3f} seconds (adaptive interval: {adaptive_interval:.3f}s)")
             time.sleep(sleep_time)
-        
+
         self.last_api_call_time = time.time()
 
     def _classify_error(self, error: APIError) -> str:
@@ -137,61 +281,103 @@ class PaperAnalyzer:
 
     def api_call_with_retry(self, max_retries: int = 5, initial_delay: float = 1.0, func=None):
         """
-        Enhanced retry mechanism with exponential backoff, jitter, and specific 429 handling.
-        
+        Enhanced retry mechanism with circuit breaker, exponential backoff, jitter, and specific 429 handling.
+
         Args:
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay in seconds (will be used as base for exponential backoff)
             func: Function to execute with retries
         """
+        # Check circuit breaker first
+        if not self.circuit_breaker.call_allowed():
+            logger.warning(f"Circuit breaker is {self.circuit_breaker.state.value} - blocking API call")
+            self.metrics.circuit_breaker_trips += 1
+            return 0.0
+
         attempt = 0
         while attempt < max_retries:
             try:
                 # Enforce rate limiting before each API call
                 self._enforce_rate_limit()
-                
+
+                # Track request
+                self.metrics.total_requests += 1
+
                 result = func()
                 if result is not None:
+                    # Record success in metrics and circuit breaker
+                    self.metrics.successful_requests += 1
+                    self.circuit_breaker.record_success()
+
                     # Reset rate limit failure count on successful calls
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
+
+                    # Log metrics periodically
+                    if self.metrics.total_requests % 10 == 0:
+                        logger.info(f"API Metrics - Success rate: {self.metrics.success_rate():.2%}, "
+                                  f"Total: {self.metrics.total_requests}, "
+                                  f"Rate limits: {self.metrics.rate_limit_errors}, "
+                                  f"Circuit breaker trips: {self.metrics.circuit_breaker_trips}")
+
                     return result
                 logger.warning("API call returned None, retrying...")
             except APIError as e:
                 error_type = self._classify_error(e)
-                
+                is_rate_limit = error_type in ["rate_limit", "input_token_acceleration"]
+
+                # Update metrics
+                if is_rate_limit:
+                    self.metrics.rate_limit_errors += 1
+                else:
+                    self.metrics.other_errors += 1
+
+                # Record failure in circuit breaker
+                self.circuit_breaker.record_failure(is_rate_limit=is_rate_limit)
+
                 # Track rate limit failures for adaptive rate limiting
                 if error_type == "rate_limit":
                     self.recent_rate_limit_failures += 1
                     # Decay the failure count over time (reset after 10 successful calls)
                     if self.recent_rate_limit_failures > 10:
                         self.recent_rate_limit_failures = 10
+
+                    # Adjust token bucket to be more conservative
+                    if self.token_bucket.rate > 1.0:
+                        self.token_bucket.rate *= 0.8  # Reduce rate by 20%
+                        logger.info(f"Adjusted token bucket rate to {self.token_bucket.rate:.2f} req/sec")
+
                 elif error_type == "input_token_acceleration":
                     self.input_token_acceleration_limit = True
                     self.recent_rate_limit_failures += 3  # More aggressive for input token limits
                     logger.warning("Input token acceleration limit detected - using extended backoff")
                     # Switch to fallback models to reduce token usage
                     self._switch_to_fallback_models()
+
+                    # Be much more conservative with rate
+                    self.token_bucket.rate = min(self.token_bucket.rate, 0.5)  # Max 1 request per 2 seconds
+                    logger.info(f"Adjusted token bucket rate to {self.token_bucket.rate:.2f} req/sec due to input token limit")
                 else:
                     # Reset failure count on non-rate-limit errors
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
-                
+
                 # Don't retry certain types of errors
                 if error_type in ["authentication", "authorization"]:
                     logger.error(f"Non-retryable error ({error_type}): {str(e)}")
                     return 0.0
-                
+
                 if attempt == max_retries - 1:
                     logger.error(f"All retry attempts failed ({error_type}): {str(e)}")
                     return 0.0
 
                 # Calculate delay with exponential backoff and jitter
                 delay = self._calculate_retry_delay(attempt, initial_delay, e)
-                
+
                 logger.warning(f"API call failed (attempt {attempt + 1}/{max_retries}, {error_type}): {str(e)}")
                 logger.info(f"Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
             except Exception as e:
                 logger.error(f"Unexpected error: {str(e)}")
+                self.metrics.other_errors += 1
                 return 0.0
             attempt += 1
         return 0.0
