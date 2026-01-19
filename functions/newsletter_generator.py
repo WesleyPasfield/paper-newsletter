@@ -15,32 +15,30 @@ from difflib import SequenceMatcher
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-EVAL_PROMPT = """You are evaluating academic papers for an expert specializing in:
+EVAL_PROMPT = """
+### Role
+You are evaluating academic papers for a researcher specializing in the transition from "Experimental AI" to "Reliable AI Systems."
 
-1. Practical LLM/Generative AI regulation:
-- Data-driven evaluation frameworks over compute based metrics
-- Domain-specific testing methodologies
-- Production deployment challenges
-- User experience validation
-- Certification processes for AI systems
-- Impact of test or inference time optimizations on model performance and governance strategies
+### 1. Governance & Regulatory Frameworks:
+- **Beyond Compute Caps:** Practical regulation focusing on data-driven evaluation rather than hardware thresholds.
+- **Certification & Safety:** Standardized testing for production deployment and domain-specific safety (e.g., clinical or legal).
+- **Inference Governance:** How test-time optimizations (scaling compute at inference) change the risk and governance profile of a model.
 
-2. Societal and economic impacts of generative AI:
-- Knowledge work transformation
-- Education system adaptation
-- Business model viability in an AI-first world
-- Implementation challenges at scale
-- Impact of autonomous agent-based systems on labor markets
-- Human and AI collaboration frameworks
+### 2. The Agentic Shift & Economic Impact:
+- **Agentic Infrastructure:** Research on memory mechanisms, "Agent-as-a-Judge," and file system abstractions for LLMs.
+- **Labor Transformation:** Concrete studies on how agents (not just chatbots) impact knowledge work and business viability.
+- **Human-Agent Interaction:** Frameworks for collaboration and the "End of Reward Engineering" in multi-agent systems.
 
-3. Technical focus areas:
-- LLM evaluation and benchmarking
-- Hybrid systems combining LLMs with deterministic approaches
-- Data curation and quality assessment
-- Converting research demos to production applications
-- Real-world deployment architectures
-- Agent based LLM applications
-- Test or Inference time optimization
+### 3. Engineering-First Technical Focus:
+- **Metrology (Judging the Judges):** Critical analysis of LLM-based evaluation, synthetic data quality, and benchmark vulnerability.
+- **Hybrid & Deterministic Systems:** Combining neural LLMs with structured code, APIs, or deterministic logic.
+- **Production Architectures:** Context engineering (Context 2.0), RAG evolution, and converting research demos into resilient apps.
+- **Optimization:** Scaling test-time compute vs. parameter scaling.
+
+### Scoring Logic Refinement:
+- **Preference for "Post-Training" over "Pre-Training":** High scores for papers focusing on alignment, evaluation, and inference-time logic.
+- **The "Vulnerability" Signal:** High scores for papers that identify flaws in current SOTA evaluation methods (e.g., MT-Bench bias).
+- **The "Agentic" Signal:** High scores for papers treating LLMs as components of a larger system (Memory, Tools, File Systems) rather than isolated text generators.
 
 Here are some example paper titles that I have found interesting lately for additional context:
 
@@ -53,16 +51,16 @@ Here are some example paper titles that I have found interesting lately for addi
 - Large Language Model Influence on Diagnostic Reasoning A Randomized Clinical Trial
 - InsightBench: Evaluating Business Analytics Agents Through Multi-Step Insight Generation
 - Best Practices and Lessons Learned on Synthetic Data for Language Models
-- Evaluating and Improving the Effectiveness of Synthetic Chest X-Rays for Medical Image Analysis
 - The Social Impact of Generative LLM-Based AI
 - Agent-as-a-Judge: Evaluate Agents with Agents
 - Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge
 - On LLMs-Driven Synthetic Data Generation, Curation, and Evaluation: A Survey
-- A Survey on Knowledge Distillation of Large Language Models
-- How Well Do LLMs Generate Code for Different Application Domains? Benchmark and Evaluation
 - Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters
-- Language Models and a second opinion use case: The Pocket Professional
 - Turn Every Application into an Agent: Towards Efficient Human-Agent-Computer Interaction with API-First LLM-Based Agents
+- A Survey on the Evolution of LLM Agent Memory Mechanisms
+- The End of Reward Engineering: How LLMs Are Rebuilding Multi-Agent Collaboration
+- Context Engineering 2.0: The Context of Context Engineering
+- Everything is Context: Agentic File System Abstractions for Context Engineering
 
 Rate papers 0-1 based on on a numeric scale:
 - Alignment with above focus areas
