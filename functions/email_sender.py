@@ -209,17 +209,26 @@ def send_verification_email(email: str, verification_token: str, sender: str, ap
     verification_url = f"{api_url}/verify?email={email}&token={verification_token}"
     
     try:
-        response = ses_client.send_templated_email(
-            Source=sender,
-            Destination={
+        # Get configuration set name for better deliverability
+        config_set_name = os.environ.get('EMAIL_CONFIGURATION_SET')
+        
+        send_params = {
+            'Source': sender,
+            'Destination': {
                 'ToAddresses': [email]
             },
-            Template='VerificationTemplate',
-            TemplateData=json.dumps({
+            'Template': 'VerificationTemplate',
+            'TemplateData': json.dumps({
                 'verification_url': verification_url,
                 'email': email
             })
-        )
+        }
+        
+        # Add ConfigurationSetName if available (critical for deliverability)
+        if config_set_name:
+            send_params['ConfigurationSetName'] = config_set_name
+        
+        response = ses_client.send_templated_email(**send_params)
         logger.info(f"Verification email sent to {email}")
         return True
     except Exception as e:
@@ -1093,7 +1102,8 @@ def sub_status_checker(event, context):
 
 def bulk_verifier(event, context):
     """
-    Manually triggered function to send verification reminders to all pending subscribers
+    Manually triggered function to send verification reminders to pending subscribers
+    who have subscribed within the last 30 days
     """
     headers = {
         'Access-Control-Allow-Origin': '*',
@@ -1111,6 +1121,9 @@ def bulk_verifier(event, context):
         }
     
     try:
+        # Calculate cutoff date (30 days ago) in UTC
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+        
         # Get all pending subscribers
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
@@ -1133,13 +1146,48 @@ def bulk_verifier(event, context):
             )
             pending_subscribers.extend(response['Items'])
         
-        if not pending_subscribers:
+        # Filter to only include subscribers who subscribed within the last 30 days
+        recent_subscribers = []
+        filtered_count = 0
+        
+        for subscriber in pending_subscribers:
+            created_at = subscriber.get('created_at')
+            if created_at:
+                try:
+                    # Parse ISO timestamp and compare
+                    # Handle both 'Z' suffix and timezone offset formats
+                    created_str = created_at.replace('Z', '+00:00')
+                    created_datetime = datetime.fromisoformat(created_str)
+                    
+                    # Ensure timezone-aware datetime
+                    if created_datetime.tzinfo is None:
+                        created_datetime = created_datetime.replace(tzinfo=timezone.utc)
+                    
+                    # Only include if created within last 30 days
+                    if created_datetime >= cutoff_date:
+                        recent_subscribers.append(subscriber)
+                    else:
+                        filtered_count += 1
+                        logger.info(f"Filtered out {subscriber.get('email', 'unknown')} - subscribed {created_at} (older than 30 days)")
+                except (ValueError, AttributeError) as e:
+                    # If date parsing fails, log and skip
+                    logger.warning(f"Could not parse created_at for {subscriber.get('email', 'unknown')}: {created_at}, error: {str(e)}")
+                    # Include it to be safe (better to send than miss)
+                    recent_subscribers.append(subscriber)
+            else:
+                # If no created_at, include it to be safe
+                logger.warning(f"Subscriber {subscriber.get('email', 'unknown')} missing created_at field")
+                recent_subscribers.append(subscriber)
+        
+        if not recent_subscribers:
             return {
                 'statusCode': 200,
                 'headers': headers,
                 'body': json.dumps({
-                    'message': 'No pending subscribers found',
-                    'count': 0
+                    'message': 'No pending subscribers found within the last 30 days',
+                    'count': 0,
+                    'total_pending': len(pending_subscribers),
+                    'filtered_out': filtered_count
                 })
             }
         
@@ -1148,7 +1196,7 @@ def bulk_verifier(event, context):
         sent_count = 0
         failures = []
         
-        for subscriber in pending_subscribers:
+        for subscriber in recent_subscribers:
             try:
                 verification_url = f"{os.environ['API_URL']}/verify?email={subscriber['email']}&token={subscriber['verification_token']}"
                 
@@ -1181,6 +1229,8 @@ def bulk_verifier(event, context):
                 'message': 'Reminder emails processed',
                 'sent_count': sent_count,
                 'total_pending': len(pending_subscribers),
+                'recent_subscribers': len(recent_subscribers),
+                'filtered_out_older_than_30_days': filtered_count,
                 'failures': failures if failures else None
             }, indent=2)
         }

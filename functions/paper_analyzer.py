@@ -497,13 +497,23 @@ class PaperAnalyzer:
                     max_tokens=4,
                     messages=[{"role": "user", "content": f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}"}]
                 )
-                score = float(response.content[0].text) 
+                score_text = response.content[0].text.strip()
+                score = float(score_text) 
                 return score if 0 <= score <= 1 else 0.0
+            except (ValueError, IndexError, AttributeError) as e:
+                logger.warning(f"Could not extract float from title evaluation response for '{paper.title}': {str(e)}. Response: {getattr(response, 'content', 'N/A')}")
+                # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
+                return 0.5
             except Exception as e:
-                logger.warning(f"Could not extract float from response: {str(e)}")
-                return 0.0
+                logger.warning(f"Unexpected error in title evaluation for '{paper.title}': {str(e)}")
+                return 0.5
 
-        return self.api_call_with_retry(func=_make_call)
+        result = self.api_call_with_retry(func=_make_call)
+        # If API call failed completely (returned 0.0), use neutral score to avoid false negatives
+        if result == 0.0:
+            logger.warning(f"Title evaluation API call failed for '{paper.title}', using neutral score 0.5")
+            return 0.5
+        return result
 
     def evaluate_abstract(self, paper: Paper) -> float:
         def _make_call():
@@ -515,15 +525,25 @@ class PaperAnalyzer:
                     model=model,
                     system=self.eval_prompt,
                     max_tokens=4,
-                    messages=[{"role": "user", "content": f"Based on the abstract, rate interest between 0 and 1 on a numeric scale::\n{paper.abstract}"}]
+                    messages=[{"role": "user", "content": f"Based on the abstract, rate interest between 0 and 1 on a numeric scale:\n{paper.abstract}"}]
                 )
-                score = float(response.content[0].text)
+                score_text = response.content[0].text.strip()
+                score = float(score_text)
                 return score if 0 <= score <= 1 else 0.0
+            except (ValueError, IndexError, AttributeError) as e:
+                logger.warning(f"Could not extract float from abstract evaluation response for '{paper.title}': {str(e)}. Response: {getattr(response, 'content', 'N/A')}")
+                # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
+                return 0.5
             except Exception as e:
-                logger.warning(f"Could not extract float from response: {str(e)}")
-                return 0.0
+                logger.warning(f"Unexpected error in abstract evaluation for '{paper.title}': {str(e)}")
+                return 0.5
 
-        return self.api_call_with_retry(func=_make_call)
+        result = self.api_call_with_retry(func=_make_call)
+        # If API call failed completely (returned 0.0), use neutral score to avoid false negatives
+        if result == 0.0:
+            logger.warning(f"Abstract evaluation API call failed for '{paper.title}', using neutral score 0.5")
+            return 0.5
+        return result
 
     def create_newsletter(self, papers: list[Paper], papers_without_content: list[Paper]) -> str:
         def _make_call():
@@ -548,6 +568,9 @@ Full Text:
             ]
 
             if not full_papers_content and not additional_papers:
+                logger.warning("No papers found for newsletter - both featured and additional papers lists are empty")
+                logger.warning(f"Processed papers count: {len(self.processed_papers)}")
+                logger.warning(f"Previously included papers count: {len(self.previously_included_papers)}")
                 return "No papers met the interest criteria this week."
 
             prompt = f"""Follow your instructions for the following papers.
@@ -631,7 +654,6 @@ Additional Papers. These should not receive a summary in the JSON response:
             return ""
 
     def process_single_feed(self, feed_url: str, title_threshold: float = 0.499, abstract_threshold: float = 0.499) -> tuple[list[Paper], list[Paper], list[Paper]]:
-        feed = feedparser.parse(feed_url)
         interesting_papers = []
         papers_without_content = []
         all_papers = []
@@ -644,8 +666,90 @@ Additional Papers. These should not receive a summary in the JSON response:
         else:
             MAX_TOTAL_PAPERS = 3
 
-        logger.info(f"Processing {len(feed.entries)} papers from feed {feed_url}")
+        try:
+            logger.info(f"Fetching feed: {feed_url}")
+            
+            # Use requests with proper User-Agent to avoid blocking
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible; AI-Research-Newsletter/1.0; +https://github.com/ai-research-newsletter)',
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
+            
+            # Fetch feed with retry logic
+            max_retries = 3
+            feed_content = None
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(feed_url, headers=headers, timeout=30, allow_redirects=True)
+                    response.raise_for_status()
+                    feed_content = response.content
+                    logger.info(f"Successfully fetched feed (attempt {attempt + 1}), status: {response.status_code}, size: {len(feed_content)} bytes")
+                    break
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"Feed fetch attempt {attempt + 1} failed for {feed_url}: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        raise
+            
+            if feed_content is None:
+                logger.error(f"Failed to fetch feed content after {max_retries} attempts")
+                return interesting_papers, papers_without_content, all_papers
+            
+            # Parse the feed content
+            logger.info(f"Parsing feed content ({len(feed_content)} bytes)")
+            feed = feedparser.parse(feed_content)
+            
+            # Check for feed parsing errors
+            if hasattr(feed, 'bozo') and feed.bozo:
+                logger.warning(f"Feed parsing warning (bozo): {feed_url}")
+                if hasattr(feed, 'bozo_exception'):
+                    logger.warning(f"Bozo exception: {feed.bozo_exception}")
+            
+            # Check feed status
+            feed_status = getattr(feed, 'status', None)
+            if feed_status:
+                logger.info(f"Feed HTTP status: {feed_status}")
+                if feed_status != 200:
+                    logger.error(f"Feed returned non-200 status: {feed_status} for {feed_url}")
+            
+            # Log feed metadata
+            feed_title = getattr(feed.feed, 'title', 'Unknown')
+            feed_link = getattr(feed.feed, 'link', 'Unknown')
+            logger.info(f"Feed title: {feed_title}, Feed link: {feed_link}")
+            
+            num_entries = len(feed.entries)
+            logger.info(f"Processing {num_entries} papers from feed {feed_url}")
+            
+            if num_entries == 0:
+                logger.error(f"Feed {feed_url} returned 0 entries!")
+                logger.error(f"Feed keys: {list(feed.keys())}")
+                logger.error(f"Feed.feed keys: {list(feed.feed.keys()) if hasattr(feed, 'feed') else 'N/A'}")
+                
+                # Try to get more diagnostic info
+                if hasattr(feed, 'headers'):
+                    logger.error(f"Feed response headers: {feed.headers}")
+                if hasattr(feed, 'href'):
+                    logger.error(f"Feed href: {feed.href}")
+                
+                # Log a sample of the feed content for debugging
+                if feed_content:
+                    sample_size = min(500, len(feed_content))
+                    logger.error(f"Feed content sample (first {sample_size} bytes): {feed_content[:sample_size]}")
+                
+                # Return empty lists but don't fail completely
+                return interesting_papers, papers_without_content, all_papers
+                
+        except Exception as e:
+            logger.error(f"Error parsing feed {feed_url}: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return empty lists on error
+            return interesting_papers, papers_without_content, all_papers
 
+        # Process entries if we have any
         for entry in feed.entries:
             # Check if we've reached the maximum number of papers
             if len(interesting_papers) + len(papers_without_content) >= MAX_TOTAL_PAPERS:
@@ -742,15 +846,27 @@ Additional Papers. These should not receive a summary in the JSON response:
             
             all_available_papers.extend(available_papers)
 
-        logger.info(f'Total papers found across all feeds: {len(all_interesting_papers)} with content, {len(all_papers_without_content)} without')
+        total_papers_found = len(all_interesting_papers) + len(all_papers_without_content)
+        logger.info(f'Total papers found across all feeds: {len(all_interesting_papers)} with content, {len(all_papers_without_content)} without (total: {total_papers_found})')
         
-        # If we have fewer than 4 featured papers, adjust thresholds to include more
-        if len(all_interesting_papers) < 4:
-            logger.info("Found fewer than 4 featured papers. Adjusting thresholds to include more papers.")
-            # Gradually lower thresholds until we get 4 featured papers
-            while len(all_interesting_papers) < 4 and (title_threshold > 0 or abstract_threshold > 0):
-                title_threshold -= 0.1
-                abstract_threshold -= 0.1
+        # If we have fewer than 4 featured papers OR no papers at all, adjust thresholds to include more
+        if len(all_interesting_papers) < 4 or total_papers_found == 0:
+            logger.info(f"Found {len(all_interesting_papers)} featured papers and {total_papers_found} total papers. Adjusting thresholds to include more papers.")
+            # Store original thresholds for logging
+            original_title_threshold = title_threshold
+            original_abstract_threshold = abstract_threshold
+            
+            # Gradually lower thresholds until we get at least some papers
+            # Continue even if we get papers without content, as those can still be included
+            max_iterations = 10  # Prevent infinite loops
+            iteration = 0
+            
+            while (len(all_interesting_papers) < 4 or total_papers_found == 0) and iteration < max_iterations:
+                iteration += 1
+                title_threshold = max(0.0, title_threshold - 0.1)
+                abstract_threshold = max(0.0, abstract_threshold - 0.1)
+                
+                logger.info(f"Threshold adjustment iteration {iteration}: title={title_threshold:.2f}, abstract={abstract_threshold:.2f}")
                 
                 # Reset processed papers but keep track of which papers were already included
                 # We need to preserve previously_included_papers to avoid duplicates
@@ -763,26 +879,57 @@ Additional Papers. These should not receive a summary in the JSON response:
                         logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping threshold adjustment.')
                         break
 
-                    papers_review, ignore_this_1, ignore_this_two = self.process_single_feed(
+                    papers_review, papers_no_content, ignore_this = self.process_single_feed(
                         feed_url, title_threshold, abstract_threshold
                     )
-                    # Only add papers that aren't already in our lists
-                    new_papers = [p for p in papers_review if p not in all_interesting_papers]
+                    
+                    # Add new featured papers that aren't already in our lists
+                    new_featured = [p for p in papers_review if p not in all_interesting_papers]
+                    # Add new papers without content that aren't already in our lists
+                    new_additional = [p for p in papers_no_content if p not in all_papers_without_content and p not in all_interesting_papers]
                     
                     # Add papers up to the maximum limit
                     remaining_slots = MAX_TOTAL_PAPERS - (len(all_interesting_papers) + len(all_papers_without_content))
                     if remaining_slots > 0:
-                        all_interesting_papers.extend(new_papers[:remaining_slots])
+                        all_interesting_papers.extend(new_featured[:remaining_slots])
+                        remaining_slots = MAX_TOTAL_PAPERS - (len(all_interesting_papers) + len(all_papers_without_content))
+                        if remaining_slots > 0:
+                            all_papers_without_content.extend(new_additional[:remaining_slots])
                     
-                    if len(all_interesting_papers) >= 4:
+                    total_papers_found = len(all_interesting_papers) + len(all_papers_without_content)
+                    
+                    # If we have at least some papers (even if not 4 featured), we can proceed
+                    if total_papers_found > 0 and len(all_interesting_papers) >= 2:
+                        logger.info(f"Found {len(all_interesting_papers)} featured and {len(all_papers_without_content)} additional papers. Proceeding with newsletter.")
                         break
                 
                 # Add back the papers from the previous batch to avoid processing them again
                 self.processed_papers.update(current_batch)
                 
+                total_papers_found = len(all_interesting_papers) + len(all_papers_without_content)
+                
+                # If we have some papers, we can proceed (don't need exactly 4 featured)
+                if total_papers_found > 0:
+                    logger.info(f"Found {total_papers_found} total papers after threshold adjustment. Proceeding.")
+                    break
+                
+                # If thresholds are already at 0, we can't go lower
                 if title_threshold <= 0 and abstract_threshold <= 0:
+                    logger.warning("Thresholds reached 0 but still no papers found. This may indicate all papers are duplicates or API failures.")
                     break
             
-            logger.info(f'After threshold adjustment: {len(all_interesting_papers)} featured papers found with final thresholds - title: {title_threshold:.2f}, abstract: {abstract_threshold:.2f}')
+            logger.info(f'After threshold adjustment: {len(all_interesting_papers)} featured papers, {len(all_papers_without_content)} additional papers found')
+            logger.info(f'Final thresholds - title: {title_threshold:.2f} (started at {original_title_threshold:.2f}), abstract: {abstract_threshold:.2f} (started at {original_abstract_threshold:.2f})')
+        
+        # Log final state before creating newsletter
+        total_final = len(all_interesting_papers) + len(all_papers_without_content)
+        if total_final == 0:
+            logger.error("No papers found after all processing attempts. This could be due to:")
+            logger.error(f"  1. All papers were duplicates (previously included: {len(self.previously_included_papers)})")
+            logger.error(f"  2. All papers scored below thresholds even after adjustment")
+            logger.error(f"  3. API failures preventing evaluation")
+            logger.error(f"  4. Content fetch failures for all papers")
+        else:
+            logger.info(f"Proceeding to create newsletter with {len(all_interesting_papers)} featured and {len(all_papers_without_content)} additional papers")
         
         return self.create_newsletter(all_interesting_papers, all_papers_without_content)

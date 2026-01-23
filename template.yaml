@@ -605,19 +605,96 @@ Resources:
         TemplateName: VerificationTemplate
         SubjectPart: "Verify your AI Papers Newsletter subscription"
         HtmlPart: |
-          <!DOCTYPE html>
-          <html>
+          <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+          <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
           <head>
             <meta charset="UTF-8">
-            <title>Welcome to the AI Paper Newsletter!</title>
-            <p>Please click the link below to verify your subscription:</p>
-            <p><a href="{{verification_url}}">Verify Email Address</a></p>
-            <p>Or copy and paste this URL: {{verification_url}}</p>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta http-equiv="X-UA-Compatible" content="IE=edge">
+            <title>Verify your AI Papers Newsletter subscription</title>
+            <style type="text/css">
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                line-height: 1.6;
+                color: #333333;
+                background-color: #f8f9fa;
+                margin: 0;
+                padding: 0;
+              }
+              .container {
+                max-width: 600px;
+                margin: 40px auto;
+                background-color: #ffffff;
+                padding: 30px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+              }
+              h1 {
+                color: #007bff;
+                margin-top: 0;
+              }
+              .button {
+                display: inline-block;
+                padding: 12px 24px;
+                background-color: #007bff;
+                color: #ffffff !important;
+                text-decoration: none;
+                border-radius: 4px;
+                margin: 20px 0;
+                font-weight: 600;
+              }
+              .button:hover {
+                background-color: #0056b3;
+              }
+              .url-text {
+                word-break: break-all;
+                color: #666666;
+                font-size: 14px;
+                margin-top: 20px;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+              }
+              .footer {
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #eeeeee;
+                font-size: 14px;
+                color: #666666;
+              }
+            </style>
           </head>
+          <body>
+            <div class="container">
+              <h1>Welcome to the AI Papers Newsletter!</h1>
+              <p>Thank you for subscribing. Please verify your email address to start receiving our weekly newsletter featuring the latest AI research papers.</p>
+              <p style="text-align: center;">
+                <a href="{{verification_url}}" class="button">Verify Email Address</a>
+              </p>
+              <p>If the button doesn't work, copy and paste this URL into your browser:</p>
+              <div class="url-text">{{verification_url}}</div>
+              <div class="footer">
+                <p>This verification link will expire in 7 days. If you didn't subscribe to this newsletter, you can safely ignore this email.</p>
+                <p style="margin-top: 20px; font-size: 12px; color: #999999;">
+                  You received this email because someone (hopefully you!) subscribed to the AI Papers Newsletter at {{email}}
+                </p>
+              </div>
+            </div>
+          </body>
           </html>
         TextPart: |
           Welcome to the AI Papers Newsletter!
-          Please click this link to verify your subscription: {{verification_url}}
+          
+          Thank you for subscribing. Please verify your email address to start receiving our weekly newsletter featuring the latest AI research papers.
+          
+          Click this link to verify your subscription:
+          {{verification_url}}
+          
+          If the link doesn't work, copy and paste the URL into your browser.
+          
+          This verification link will expire in 7 days. If you didn't subscribe to this newsletter, you can safely ignore this email.
+          
+          You received this email because someone (hopefully you!) subscribed to the AI Papers Newsletter at {{email}}
 
   WelcomeTemplate:
     Type: AWS::SES::Template
