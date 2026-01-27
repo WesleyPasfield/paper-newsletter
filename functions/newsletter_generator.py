@@ -6,7 +6,7 @@ from .email_sender import send_newsletter
 import logging
 from datetime import datetime
 import codecs
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 import boto3
 from botocore.exceptions import ClientError
 import re
@@ -81,14 +81,27 @@ Provide a response that ONLY contains the rated score and no other text:
 A score above 0.5 indicates its worth passing to the next stage of paper review."""
 
 NEWSLETTER_PROMPT = """You are a research assistant creating an AI/ML research newsletter. Your task is to summarize the papers provided. 
+Your response MUST be valid JSON that can be parsed by a JSON parser. This is critical.
+
+CRITICAL JSON FORMATTING REQUIREMENTS:
+1. All string values MUST have quotes properly escaped. If a string contains a double quote character, you MUST escape it as \\"
+2. All special characters in strings must be properly escaped: \\" for quotes, \\n for newlines, \\\\ for backslashes
+3. Do NOT include any text before or after the JSON object
+4. Do NOT include markdown code blocks (no ```json or ```)
+5. Ensure all strings are properly closed with closing quotes
+6. All commas, brackets, and braces must be properly balanced
+
 Your response ONLY should contain the following JSON format replacing the values with relevant details from the provided content in this request.
 You do NOT define what is a featured vs. additional paper, that information is provided. All featured papers should receive the full summary section. All Additional Papers should not. 
-    {
-  "overview": "Brief overview of common themes and key findings across papers, focusing on methodological advancements, practical applications, and emerging trends.",
+
+Example of proper escaping: If a paper title is "AI" Systems, it must be written as "\\"AI\\" Systems" in the JSON.
+
+{
+  "overview": "Brief overview of common themes and key findings across papers, focusing on methodological advancements, practical applications, and emerging trends. Keep it concise - 2-3 sentences maximum.",
   "featured_papers": [
     {
       "title": "Full title of the paper",
-      "summary": "2-3 paragraphs summarizing technical contributions, practical implications and key takeaways. Emphasize key figures and be opinionated",
+      "summary": "A concise 2-3 sentence summary highlighting the key technical contribution, practical implications, and why it matters. Be opinionated but brief. Focus on the most important insight or finding. Maximum 150 words.",
       "link": "https://arxiv.org/abs/paper-id"
     }
   ],
@@ -104,7 +117,16 @@ You do NOT define what is a featured vs. additional paper, that information is p
     "featured_papers_count": 7,
     "additional_papers_count": 3
   }
-}"""
+}
+
+IMPORTANT LENGTH REQUIREMENTS:
+- Overview: Maximum 4-6 sentences (150-250 words)
+- Featured paper summaries: Maximum 3-5 sentences (150-250 words each)
+- Be concise and scannable - readers should be able to quickly understand the key points
+- Prioritize clarity and brevity over completeness
+- Write in a formal yet approachable tone suitable for technical professionals - use precise terminology while remaining accessible and engaging
+
+Remember: Your output must be valid, parseable JSON with all quotes properly escaped."""
 
 def normalize_arxiv_link(link: str) -> str:
     """
@@ -286,12 +308,207 @@ def store_newsletter(json_content: Dict) -> str:
         logger.error(f"Error storing newsletter: {str(e)}")
         raise
 
+def extract_json_with_regex(content: str) -> Optional[Dict]:
+    """
+    Fallback method to extract JSON data using regex patterns when parsing fails.
+    This is a last resort that tries to extract key fields even from malformed JSON.
+    Uses a more sophisticated approach to handle quotes within strings.
+    """
+    try:
+        result = {
+            'overview': '',
+            'featured_papers': [],
+            'additional_papers': [],
+            'metadata': {}
+        }
+        
+        # Extract overview - handle strings that may contain quotes
+        # Look for "overview": "..." where ... may contain unescaped quotes
+        overview_pattern = r'"overview"\s*:\s*"((?:[^"\\]|\\.|"(?=\s*[,}\]]))*)"'
+        overview_match = re.search(overview_pattern, content, re.DOTALL)
+        if not overview_match:
+            # More lenient: find everything between "overview": " and the next ", or , or }
+            overview_pattern = r'"overview"\s*:\s*"(.*?)(?="\s*[,}])'
+            overview_match = re.search(overview_pattern, content, re.DOTALL)
+        if overview_match:
+            overview_text = overview_match.group(1)
+            # Clean up escaped sequences
+            overview_text = overview_text.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+            result['overview'] = overview_text
+        
+        # Extract featured papers - use a more sophisticated approach
+        # Find the featured_papers array content
+        featured_start = content.find('"featured_papers"')
+        if featured_start != -1:
+            # Find the opening bracket
+            bracket_start = content.find('[', featured_start)
+            if bracket_start != -1:
+                # Find matching closing bracket by counting
+                bracket_count = 0
+                bracket_end = bracket_start
+                for i in range(bracket_start, min(bracket_start + 50000, len(content))):  # Limit search
+                    if content[i] == '[':
+                        bracket_count += 1
+                    elif content[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            bracket_end = i
+                            break
+                
+                if bracket_end > bracket_start:
+                    featured_content = content[bracket_start + 1:bracket_end]
+                    
+                    # Extract papers using a more lenient pattern
+                    # Look for paper objects: { "title": "...", ... "link": "..." }
+                    # Handle titles and links that may contain quotes
+                    paper_objects = []
+                    i = 0
+                    while i < len(featured_content):
+                        # Find next paper object start
+                        obj_start = featured_content.find('{', i)
+                        if obj_start == -1:
+                            break
+                        
+                        # Find matching closing brace
+                        brace_count = 0
+                        obj_end = obj_start
+                        for j in range(obj_start, min(obj_start + 10000, len(featured_content))):
+                            if featured_content[j] == '{':
+                                brace_count += 1
+                            elif featured_content[j] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    obj_end = j + 1
+                                    break
+                        
+                        if obj_end > obj_start:
+                            paper_obj = featured_content[obj_start:obj_end]
+                            paper_objects.append(paper_obj)
+                            i = obj_end
+                        else:
+                            break
+                    
+                    # Extract title and link from each paper object
+                    for paper_obj in paper_objects:
+                        title = None
+                        link = None
+                        summary = None
+                        
+                        # Extract title - handle quotes in title
+                        title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.|"(?=\s*[,}]))*)"', paper_obj, re.DOTALL)
+                        if not title_match:
+                            # Fallback: find everything between "title": " and next ", or ,
+                            title_match = re.search(r'"title"\s*:\s*"(.*?)(?="\s*[,}])', paper_obj, re.DOTALL)
+                        if title_match:
+                            title = title_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                        
+                        # Extract link
+                        link_match = re.search(r'"link"\s*:\s*"((?:[^"\\]|\\.)*)"', paper_obj, re.DOTALL)
+                        if not link_match:
+                            link_match = re.search(r'"link"\s*:\s*"(.*?)(?="\s*[,}])', paper_obj, re.DOTALL)
+                        if link_match:
+                            link = link_match.group(1).replace('\\"', '"')
+                        
+                        # Extract summary if present
+                        summary_match = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.|"(?=\s*[,}]))*)"', paper_obj, re.DOTALL)
+                        if not summary_match:
+                            summary_match = re.search(r'"summary"\s*:\s*"(.*?)(?="\s*[,}])', paper_obj, re.DOTALL)
+                        if summary_match:
+                            summary = summary_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                        
+                        if title and link:
+                            result['featured_papers'].append({
+                                'title': title,
+                                'link': link,
+                                'summary': summary or 'Summary extraction failed'
+                            })
+        
+        # Extract additional papers using similar approach
+        additional_start = content.find('"additional_papers"')
+        if additional_start != -1:
+            bracket_start = content.find('[', additional_start)
+            if bracket_start != -1:
+                bracket_count = 0
+                bracket_end = bracket_start
+                for i in range(bracket_start, min(bracket_start + 50000, len(content))):
+                    if content[i] == '[':
+                        bracket_count += 1
+                    elif content[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            bracket_end = i
+                            break
+                
+                if bracket_end > bracket_start:
+                    additional_content = content[bracket_start + 1:bracket_end]
+                    
+                    # Extract paper objects
+                    paper_objects = []
+                    i = 0
+                    while i < len(additional_content):
+                        obj_start = additional_content.find('{', i)
+                        if obj_start == -1:
+                            break
+                        brace_count = 0
+                        obj_end = obj_start
+                        for j in range(obj_start, min(obj_start + 5000, len(additional_content))):
+                            if additional_content[j] == '{':
+                                brace_count += 1
+                            elif additional_content[j] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    obj_end = j + 1
+                                    break
+                        if obj_end > obj_start:
+                            paper_obj = additional_content[obj_start:obj_end]
+                            paper_objects.append(paper_obj)
+                            i = obj_end
+                        else:
+                            break
+                    
+                    for paper_obj in paper_objects:
+                        title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.|"(?=\s*[,}]))*)"', paper_obj, re.DOTALL)
+                        if not title_match:
+                            title_match = re.search(r'"title"\s*:\s*"(.*?)(?="\s*[,}])', paper_obj, re.DOTALL)
+                        link_match = re.search(r'"link"\s*:\s*"((?:[^"\\]|\\.)*)"', paper_obj, re.DOTALL)
+                        if not link_match:
+                            link_match = re.search(r'"link"\s*:\s*"(.*?)(?="\s*[,}])', paper_obj, re.DOTALL)
+                        
+                        if title_match and link_match:
+                            title = title_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                            link = link_match.group(1).replace('\\"', '"')
+                            result['additional_papers'].append({
+                                'title': title,
+                                'link': link
+                            })
+        
+        # Only return if we got at least some data
+        if result['overview'] or result['featured_papers'] or result['additional_papers']:
+            result['metadata'] = {
+                'generated_date': datetime.now().strftime('%Y-%m-%d'),
+                'featured_papers_count': len(result['featured_papers']),
+                'additional_papers_count': len(result['additional_papers']),
+                'total_papers_analyzed': len(result['featured_papers']) + len(result['additional_papers']),
+                'extracted_via_fallback': True
+            }
+            logger.info(f"Regex fallback extracted {len(result['featured_papers'])} featured and {len(result['additional_papers'])} additional papers")
+            return result
+        
+        logger.warning("Regex fallback extraction found no data")
+        return None
+    except Exception as e:
+        logger.error(f"Error in regex fallback extraction: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
+
 def extract_json_from_text(content: str) -> str:
     """
     Extract JSON from text that may contain extra content before/after.
     Tries multiple strategies to find and extract valid JSON.
+    Prefers JSON objects over arrays.
     """
-    # Strategy 1: Find JSON object by braces
+    # Strategy 1: Find JSON object by braces (preferred for newsletter format)
     # Look for outermost { } pair
     first_brace = content.find('{')
     if first_brace != -1:
@@ -303,9 +520,13 @@ def extract_json_from_text(content: str) -> str:
             elif content[i] == '}':
                 brace_count -= 1
                 if brace_count == 0:
-                    return content[first_brace:i+1]
+                    extracted = content[first_brace:i+1]
+                    # Validate it's not an empty object
+                    if extracted.strip() != '{}':
+                        return extracted
 
-    # Strategy 2: Find JSON array by brackets
+    # Strategy 2: Find JSON array by brackets (only if no object found)
+    # But skip empty arrays
     first_bracket = content.find('[')
     if first_bracket != -1:
         bracket_count = 0
@@ -315,13 +536,25 @@ def extract_json_from_text(content: str) -> str:
             elif content[i] == ']':
                 bracket_count -= 1
                 if bracket_count == 0:
-                    return content[first_bracket:i+1]
+                    extracted = content[first_bracket:i+1]
+                    # Skip empty arrays - we need an object for newsletter format
+                    if extracted.strip() != '[]':
+                        # Try to parse to see if it's actually valid
+                        try:
+                            parsed = json.loads(extracted)
+                            # If it's an array, log warning but return it
+                            if isinstance(parsed, list):
+                                logger.warning(f"Extracted JSON array instead of object: {extracted[:100]}...")
+                            return extracted
+                        except:
+                            pass
 
     return content
 
 def repair_json(content: str) -> str:
     """
-    Attempt to repair common JSON formatting issues.
+    Attempt to repair common JSON formatting issues, including unterminated strings.
+    Uses a more robust approach to handle unescaped quotes in string values.
     """
     # Remove trailing commas before closing braces/brackets
     content = re.sub(r',(\s*[}\]])', r'\1', content)
@@ -335,7 +568,162 @@ def repair_json(content: str) -> str:
     # If JSON ends with a comma and incomplete object, remove it
     content = re.sub(r',\s*$', '', content)
 
-    return content
+    # Try to fix unterminated strings by escaping unescaped quotes within string values
+    # This uses a state machine approach to properly identify string boundaries
+    try:
+        # First, try to parse to see if there are specific issues
+        json.loads(content)
+        return content  # If it parses, return as-is
+    except json.JSONDecodeError as e:
+        error_msg = str(e)
+        if "Unterminated string" in error_msg:
+            logger.info(f"Attempting to repair unterminated string: {error_msg}")
+            
+            # Extract error position if available
+            char_match = re.search(r'\(char (\d+)\)', error_msg)
+            error_pos = int(char_match.group(1)) if char_match else -1
+            
+            # Use a more sophisticated approach: find the problematic string and fix it
+            # The error is at a specific position, so let's work backwards from there
+            if error_pos > 0 and error_pos < len(content):
+                # Find the start of the string that contains the error
+                # Look backwards for the opening quote of a string value
+                string_start = -1
+                for i in range(error_pos - 1, max(0, error_pos - 5000), -1):
+                    if content[i] == '"':
+                        # Check if this is a string value (not a key)
+                        # Look backwards for : to see if this is a value
+                        before_quote = content[max(0, i-50):i].rstrip()
+                        if ':' in before_quote and not before_quote.rstrip().endswith('\\'):
+                            # This looks like a string value start
+                            string_start = i
+                            break
+                
+                if string_start >= 0:
+                    # Now find where the string should end
+                    # Look forward from error_pos for the next quote followed by , } ] or whitespace
+                    string_content = content[string_start + 1:]
+                    repaired_content = content[:string_start + 1]
+                    
+                    # Process character by character, escaping unescaped quotes
+                    i = 0
+                    in_escape = False
+                    found_end = False
+                    
+                    while i < len(string_content) and not found_end:
+                        char = string_content[i]
+                        
+                        if in_escape:
+                            repaired_content += char
+                            in_escape = False
+                        elif char == '\\':
+                            repaired_content += char
+                            in_escape = True
+                        elif char == '"':
+                            # Check if this should end the string
+                            lookahead = string_content[i+1:i+10].lstrip() if i+1 < len(string_content) else ""
+                            if (lookahead.startswith(',') or lookahead.startswith('}') or 
+                                lookahead.startswith(']') or lookahead == '' or 
+                                lookahead.startswith('\n')):
+                                # This is the end of the string
+                                repaired_content += char
+                                found_end = True
+                            else:
+                                # This is a quote within the string - escape it
+                                repaired_content += '\\"'
+                                logger.debug(f"Escaped quote at position {string_start + 1 + i}")
+                        else:
+                            repaired_content += char
+                        
+                        i += 1
+                    
+                    # Add the rest of the content
+                    if found_end:
+                        repaired_content += string_content[i:]
+                    else:
+                        # If we didn't find an end, try to add a closing quote
+                        repaired_content += '"'
+                        # Try to find where the string should have ended
+                        remaining = string_content[i:]
+                        # Look for the next structural character
+                        end_pos = -1
+                        for j, c in enumerate(remaining):
+                            if c in [',', '}', ']']:
+                                end_pos = j
+                                break
+                        if end_pos >= 0:
+                            repaired_content += remaining[:end_pos] + remaining[end_pos:]
+                        else:
+                            repaired_content += remaining
+                    
+                    logger.info(f"Attempted to repair unterminated string by escaping quotes between positions {string_start} and {error_pos}")
+                    
+                    # Try parsing the repaired version
+                    try:
+                        json.loads(repaired_content)
+                        logger.info("Successfully repaired JSON")
+                        return repaired_content
+                    except json.JSONDecodeError as e2:
+                        logger.warning(f"Repair attempt failed: {str(e2)}")
+                        # Fall through to return original
+            
+            # If position-based repair didn't work, try the character-by-character approach
+            logger.info("Trying character-by-character repair approach")
+            result = []
+            in_string = False
+            escape_next = False
+            i = 0
+            
+            while i < len(content):
+                char = content[i]
+                
+                if escape_next:
+                    result.append(char)
+                    escape_next = False
+                elif char == '\\':
+                    result.append(char)
+                    escape_next = True
+                elif char == '"':
+                    if not in_string:
+                        # Starting a new string
+                        result.append(char)
+                        in_string = True
+                    else:
+                        # We're inside a string - check if this quote ends the string
+                        lookahead_start = i + 1
+                        lookahead_end = min(i + 20, len(content))
+                        lookahead = content[lookahead_start:lookahead_end].lstrip()
+                        
+                        # If followed by :, }, ], ,, or end of line, it's likely the end of the string
+                        if (lookahead.startswith(':') or lookahead.startswith(',') or 
+                            lookahead.startswith('}') or lookahead.startswith(']') or
+                            lookahead == '' or lookahead.startswith('\n')):
+                            # This appears to be the end of a string value
+                            result.append(char)
+                            in_string = False
+                        else:
+                            # This is likely a quote within a string value that needs escaping
+                            result.append('\\"')
+                            logger.debug(f"Escaped quote at position {i} (near error at {error_pos})")
+                else:
+                    result.append(char)
+                
+                i += 1
+            
+            repaired = ''.join(result)
+            logger.info("Attempted to repair unterminated string by escaping internal quotes")
+            
+            # Try parsing the repaired version
+            try:
+                json.loads(repaired)
+                logger.info("Successfully repaired JSON")
+                return repaired
+            except json.JSONDecodeError as e2:
+                logger.warning(f"Repair attempt failed: {str(e2)}, returning original for fallback extraction")
+                return content
+        
+        # If we can't repair the specific error, return original
+        return content
 
 def validate_and_fix_newsletter_data(data: Dict) -> Dict:
     """
@@ -414,14 +802,8 @@ def process_newsletter_content(content: str) -> Dict:
     original_content = content
 
     try:
-        # Step 1: Handle TextBlock formatting if present
-        if "TextBlock(text='" in content:
-            content = content.split("TextBlock(text='", 1)[1].rsplit("')", 1)[0]
-            content = content.split("', type='text", 1)[0]
-            content = codecs.escape_decode(content)[0].decode('utf-8')
-            logger.info("Extracted content from TextBlock formatting")
-
-        # Step 2: Handle markdown code blocks (```json ... ``` or ``` ... ```)
+        # Step 1: Handle markdown code blocks (```json ... ``` or ``` ... ```)
+        # Claude may wrap JSON in code blocks even though we ask it not to
         if '```' in content:
             # Find all code blocks
             code_block_pattern = r'```(?:json)?\s*\n(.*?)\n```'
@@ -444,13 +826,35 @@ def process_newsletter_content(content: str) -> Dict:
                     content = '\n'.join(json_lines)
                     logger.info("Extracted JSON from generic code block")
 
-        # Step 3: Extract JSON from surrounding text
+        # Step 2: Extract JSON from surrounding text (handles any extra text before/after JSON)
         content = extract_json_from_text(content)
         logger.info(f"Attempting to parse JSON content (first 200 chars): {content[:200]}...")
 
-        # Step 4: Try to parse JSON
+        # Step 3: Try to parse JSON
         try:
+            # Check if content is just an empty object string
+            if content.strip() == "{}" or content.strip() == "":
+                error_msg = "API returned empty response - no content generated"
+                logger.error(error_msg)
+                logger.error(f"Original content length: {len(original_content)}")
+                logger.error(f"Processed content: {repr(content)}")
+                raise ValueError(error_msg)
+            
             newsletter_data = json.loads(content)
+            
+            # Validate that we got a dictionary, not a list or other type
+            if not isinstance(newsletter_data, dict):
+                error_msg = f"Expected JSON object (dict), but got {type(newsletter_data).__name__}: {str(newsletter_data)[:200]}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # Validate it's not empty
+            if not newsletter_data:
+                error_msg = "Parsed JSON object is empty"
+                logger.error(error_msg)
+                logger.error(f"Content that failed: {repr(content)}")
+                raise ValueError(error_msg)
+                
         except json.JSONDecodeError as e:
             logger.warning(f"Initial JSON parse failed: {str(e)}, attempting repair")
 
@@ -464,9 +868,21 @@ def process_newsletter_content(content: str) -> Dict:
                 logger.error(f"JSON repair failed: {str(e2)}")
                 logger.error(f"Original content (first 500 chars): {original_content[:500]}...")
                 logger.error(f"Processed content (first 500 chars): {content[:500]}...")
-                raise ValueError(f"Unable to parse JSON even after repair attempts: {str(e2)}")
+                
+                # Last resort: try to extract partial data using regex as fallback
+                logger.warning("Attempting fallback extraction using regex patterns")
+                try:
+                    fallback_data = extract_json_with_regex(content)
+                    if fallback_data:
+                        logger.info("Successfully extracted partial data using regex fallback")
+                        newsletter_data = fallback_data
+                    else:
+                        raise ValueError(f"Unable to parse JSON even after repair attempts: {str(e2)}")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback extraction also failed: {str(fallback_error)}")
+                    raise ValueError(f"Unable to parse JSON even after repair attempts: {str(e2)}")
 
-        # Step 5: Validate and fix the data structure
+        # Step 4: Validate and fix the data structure
         newsletter_data = validate_and_fix_newsletter_data(newsletter_data)
 
         logger.info(f"Successfully processed newsletter with {len(newsletter_data['featured_papers'])} featured papers "

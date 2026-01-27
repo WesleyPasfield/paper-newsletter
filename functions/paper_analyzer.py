@@ -550,7 +550,15 @@ class PaperAnalyzer:
             logger.info(f"Creating newsletter for {len(papers)} full papers and {len(papers_without_content)} papers without content")
 
             full_papers_content = []
-            max_chars_per_paper = 50000
+            # Reduce max chars per paper if we have many papers to avoid hitting token limits
+            # With 9 papers at 50k each, that's 450k chars just for paper content
+            # Reduce to 20k per paper if we have 5+ papers to keep total under reasonable limits
+            if len(papers) >= 5:
+                max_chars_per_paper = 20000
+                logger.info(f"Reducing max chars per paper to {max_chars_per_paper} due to large number of papers ({len(papers)})")
+            else:
+                max_chars_per_paper = 50000
+                
             for paper in papers:
                 full_papers_content.append(f"""
 ## {paper.title} (Interest Score: {paper.interest_score:.2f})
@@ -577,23 +585,87 @@ Full Text:
 
 There are {len(full_papers_content)} featured papers and {len(additional_papers)} additional papers
 This process will be deemed a failure if there are not {len(full_papers_content)} papers in the featured papers section of the json object returned
-Featured Papers. These should receive a full summary in the JSON response:
+
+IMPORTANT: Keep all summaries concise and scannable for a newsletter format:
+- Overview: 2-3 sentences maximum (50-100 words)
+- Each featured paper summary: 2-3 sentences maximum (100-150 words)
+- Focus on the most important insights and practical implications, not exhaustive details
+- Be opinionated but brief - readers should quickly understand why this paper matters
+- Prioritize clarity and brevity over completeness
+
+CRITICAL: You MUST return valid JSON. Your response must start with {{ and end with }}. Do not include any text before or after the JSON object.
+
+Featured Papers. These should receive a concise summary in the JSON response:
 {chr(10).join(full_papers_content)}
 
 Additional Papers. These should not receive a summary in the JSON response:
 {chr(10).join(additional_papers)}"""
 
+            # Log prompt length for debugging
+            prompt_length = len(prompt)
+            system_length = len(self.newsletter_prompt)
+            total_length = prompt_length + system_length
+            logger.info(f"Prompt length: {prompt_length:,} chars, System prompt length: {system_length:,} chars, Total: {total_length:,} chars")
+            
             # Use appropriate model based on fallback level
             model = self._get_current_model(is_expensive_operation=True)
             
-            response = self.client.messages.create(
-                model=model,
-                system=self.newsletter_prompt,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            return str(response.content)
+            # Note: Structured outputs require SDK >= 0.34.0 and specific model versions
+            # For now, we'll rely on the improved prompt to generate valid JSON
+            # Structured outputs can be enabled later when SDK is updated
+            logger.info(f"Using regular API call for model {model} with improved JSON formatting prompt")
+            
+            try:
+                # Make the API call
+                response = self.client.messages.create(
+                    model=model,
+                    system=self.newsletter_prompt,
+                    max_tokens=8000,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                
+                # Immediately check if we got a valid response
+                if response is None:
+                    raise ValueError("API returned None response")
+                
+                # CRITICAL: Try to access content immediately, using the same pattern as evaluate_title
+                # This works for evaluate_title, so it should work here too
+                try:
+                    # Access content the same way as the working methods
+                    text_content = response.content[0].text
+                    if text_content:
+                        logger.info(f"Successfully extracted {len(text_content)} characters from API response")
+                        return text_content
+                    else:
+                        logger.error("response.content[0].text exists but is empty or None")
+                except (IndexError, AttributeError) as e:
+                    # If direct access fails, log detailed diagnostics
+                    logger.error(f"Direct access failed: {str(e)}")
+                    logger.error(f"Response type: {type(response)}")
+                    logger.error(f"Response has content: {hasattr(response, 'content')}")
+                    
+                    if hasattr(response, 'content'):
+                        content_value = response.content
+                        logger.error(f"Response.content type: {type(content_value)}")
+                        logger.error(f"Response.content value: {content_value}")
+                        logger.error(f"Response.content length: {len(content_value) if content_value else 'None'}")
+                        
+                        # Check stop_reason and usage
+                        stop_reason = getattr(response, 'stop_reason', 'unknown')
+                        stop_sequence = getattr(response, 'stop_sequence', None)
+                        usage = getattr(response, 'usage', None)
+                        logger.error(f"stop_reason: {stop_reason}, stop_sequence: {stop_sequence}, usage: {usage}")
+                        
+                        if usage:
+                            logger.error(f"  Input tokens: {getattr(usage, 'input_tokens', 'N/A')}")
+                            logger.error(f"  Output tokens: {getattr(usage, 'output_tokens', 'N/A')}")
+                    
+                    raise ValueError(f"Could not extract text from response: {str(e)}")
+                    
+            except Exception as e:
+                logger.error(f"API call failed with exception: {str(e)}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                raise
 
         result = self.api_call_with_retry(func=_make_call)
         
@@ -601,15 +673,15 @@ Additional Papers. These should not receive a summary in the JSON response:
         if isinstance(result, (int, float)) and result == 0.0:
             logger.error("Newsletter creation failed due to API errors, returning fallback content")
             return json.dumps({
-                "overview": "Unable to generate newsletter content due to API rate limiting. Please try again later.",
+                "overview": "Unable to generate newsletter content due to API errors. Please check logs and retry.",
                 "featured_papers": [],
                 "additional_papers": [],
                 "metadata": {
                     "generated_date": datetime.now().strftime('%Y-%m-%d'),
-                    "total_papers_analyzed": 0,
+                    "total_papers_analyzed": len(papers) + len(papers_without_content),
                     "featured_papers_count": 0,
                     "additional_papers_count": 0,
-                    "error": "API rate limiting prevented newsletter generation"
+                    "error": "API errors prevented newsletter generation"
                 }
             })
         
