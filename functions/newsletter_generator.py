@@ -19,21 +19,28 @@ EVAL_PROMPT = """
 ### Role
 You are evaluating academic papers for a researcher specializing in the transition from "Experimental AI" to "Reliable AI Systems."
 
-### 1. Governance & Regulatory Frameworks:
-- **Beyond Compute Caps:** Practical regulation focusing on data-driven evaluation rather than hardware thresholds.
-- **Certification & Safety:** Standardized testing for production deployment and domain-specific safety (e.g., clinical or legal).
-- **Inference Governance:** How test-time optimizations (scaling compute at inference) change the risk and governance profile of a model.
-
-### 2. The Agentic Shift & Economic Impact:
+### 1. The Agentic Shift & Economic Impact:
 - **Agentic Infrastructure:** Research on memory mechanisms, "Agent-as-a-Judge," and file system abstractions for LLMs.
 - **Labor Transformation:** Concrete studies on how agents (not just chatbots) impact knowledge work and business viability.
 - **Human-Agent Interaction:** Frameworks for collaboration and the "End of Reward Engineering" in multi-agent systems.
+
+### 2. Agent Evaluation
+- **Agent-as-a-Judge:** Evaluating agents with agents.
+- **Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge:** Integration of human feedback into agent evaluation
+- **Agent Skills** Skills impact on agent performance and reliability 
+- **Rubrics** Shift from monolithic agent as judge to modular rubrics
 
 ### 3. Engineering-First Technical Focus:
 - **Metrology (Judging the Judges):** Critical analysis of LLM-based evaluation, synthetic data quality, and benchmark vulnerability.
 - **Hybrid & Deterministic Systems:** Combining neural LLMs with structured code, APIs, or deterministic logic.
 - **Production Architectures:** Context engineering (Context 2.0), RAG evolution, and converting research demos into resilient apps.
 - **Optimization:** Scaling test-time compute vs. parameter scaling.
+- **Human steered self-improvement** Human feedback in natural language as a guide for agent self-improvement
+
+### 4. Governance & Regulatory Frameworks:
+- **Beyond Compute Caps:** Practical regulation focusing on data-driven evaluation rather than hardware thresholds.
+- **Certification & Safety:** Standardized testing for production deployment and domain-specific safety (e.g., clinical or legal).
+- **Inference Governance:** How test-time optimizations (scaling compute at inference) change the risk and governance profile of a model.
 
 ### Scoring Logic Refinement:
 - **Preference for "Post-Training" over "Pre-Training":** High scores for papers focusing on alignment, evaluation, and inference-time logic.
@@ -44,7 +51,7 @@ Here are some example paper titles that I have found interesting lately for addi
 
 - On the Limitations of Compute Thresholds as a Governance Strategy for Large Language Models
 - Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena
-- Evaluating Synthetic Data for Tool-Using LLMs
+- Hierarchical Reward Design from Language: Enhancing Alignment of Agent Behavior with Human Specifications
 - Towards Monosemanticity: Decomposing Language Models With Dictionary Learning
 - Judging the Judges: Evaluating Alignment and Vulnerabilities in LLMs-as-Judges
 - LalaEval: A Holistic Human Evaluation Framework for Domain-Specific Large Language Models
@@ -61,6 +68,8 @@ Here are some example paper titles that I have found interesting lately for addi
 - The End of Reward Engineering: How LLMs Are Rebuilding Multi-Agent Collaboration
 - Context Engineering 2.0: The Context of Context Engineering
 - Everything is Context: Agentic File System Abstractions for Context Engineering
+- SkillsBench: Benchmarking How Well Agent Skills Work Across Diverse Tasks
+- Towards a Science of AI Agent Reliability
 
 Rate papers 0-1 based on on a numeric scale:
 - Alignment with above focus areas
