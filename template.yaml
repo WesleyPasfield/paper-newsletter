@@ -45,21 +45,21 @@ Parameters:
     Type: String
     Default: ""
     Description: Email address to send test emails to
-  ClaudeModelCheap:
+  OpenAIModelCheap:
     Type: String
-    Default: "claude-haiku-4-5-20251001"
-    Description: Claude model for cheap/fast operations (paper title evaluation)
-  ClaudeModelExpensive:
+    Default: "gpt-5.4-nano"
+    Description: OpenAI model for cheap/fast operations (paper title evaluation)
+  OpenAIModelExpensive:
     Type: String
-    Default: "claude-sonnet-4-5-20250929"
-    Description: Claude model for expensive/complex operations (paper abstract evaluation, newsletter generation)
-  ClaudeModelFallback:
+    Default: "gpt-5.4-mini"
+    Description: OpenAI model for expensive/complex operations (paper abstract evaluation, newsletter generation)
+  OpenAIModelFallback:
     Type: String
-    Default: "claude-3-7-sonnet-20250219"
+    Default: "gpt-5.4"
     Description: Fallback model when rate limits are hit
-  ClaudeModelEmergency:
+  OpenAIModelEmergency:
     Type: String
-    Default: "claude-3-haiku-20240307"
+    Default: "gpt-5"
     Description: Emergency fallback model for severe rate limiting
 
 Conditions:
@@ -87,10 +87,10 @@ Globals:
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
         EMAIL_TEST_MODE: !Ref EmailTestMode
         EMAIL_TEST_ADDRESS: !Ref EmailTestAddress
-        CLAUDE_MODEL_CHEAP: !Ref ClaudeModelCheap
-        CLAUDE_MODEL_EXPENSIVE: !Ref ClaudeModelExpensive
-        CLAUDE_MODEL_FALLBACK: !Ref ClaudeModelFallback
-        CLAUDE_MODEL_EMERGENCY: !Ref ClaudeModelEmergency
+        OPENAI_MODEL_CHEAP: !Ref OpenAIModelCheap
+        OPENAI_MODEL_EXPENSIVE: !Ref OpenAIModelExpensive
+        OPENAI_MODEL_FALLBACK: !Ref OpenAIModelFallback
+        OPENAI_MODEL_EMERGENCY: !Ref OpenAIModelEmergency
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
@@ -170,7 +170,7 @@ Resources:
       ReservedConcurrentExecutions: 1
       Environment:
         Variables:
-          ANTHROPIC_API_KEY: !Sub "{{resolve:secretsmanager:anthropic/api_key}}"
+          OPENAI_SECRET_NAME: openai/paper_newsletter_key
           EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
           LOG_LEVEL: INFO
           NEWSLETTER_BUCKET: !Ref NewsletterBucket
@@ -182,7 +182,7 @@ Resources:
             - Effect: Allow
               Action: 
                 - "secretsmanager:GetSecretValue"
-              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:anthropic/api_key-*"
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openai/paper_newsletter_key-*"
             - Effect: Allow
               Action:
                 - ses:SendRawEmail

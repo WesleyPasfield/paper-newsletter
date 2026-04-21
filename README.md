@@ -1,6 +1,6 @@
 # AI Research Paper Newsletter
 
-Automatically generates and sends newsletters about AI research papers using AWS Lambda and Claude. Create your own prompts that fit your desired use case.
+Automatically generates and sends newsletters about AI research papers using AWS Lambda and OpenAI. Create your own prompts that fit your desired use case.
 
 [Sign up here](https://wesleypasfield.com/aipapers/) for  the original version.
 
@@ -8,7 +8,7 @@ Here's an [article](https://substack.com/home/post/p-152582033) I put together t
 
 ## Features
 
-- 🤖 Uses Claude to evaluate and summarize AI research papers
+- 🤖 Uses OpenAI models to evaluate and summarize AI research papers
 - 📊 Customizable paper evaluation criteria
 - 📧 Automated email delivery via AWS SES
 - ✅ Double opt-in subscriber management
@@ -25,7 +25,7 @@ Below is an example of the newsletter final output:
 ## Architecture
 
 The system consists of several key components:
-- Paper Analyzer: Evaluates papers using Claude
+- Paper Analyzer: Evaluates papers using OpenAI
 - Newsletter Generator: Creates formatted newsletters
 - Email Management: Handles subscriptions and delivery
 - Monitoring: Tracks delivery and engagement metrics
@@ -35,7 +35,7 @@ The system consists of several key components:
 ## Prerequisites
 
 - AWS Account with SES in production mode
-- Anthropic API Key
+- OpenAI API Key
 - Python 3.11+
 - AWS SAM CLI
 - Verified SES sender email or domain
@@ -49,10 +49,14 @@ The system consists of several key components:
 
 2. **Create Required Secrets**
    ```bash
+   export OPENAI_PAPER_NEWSLETTER_KEY="sk-proj-your-key-here"
+
    aws secretsmanager create-secret \
-       --name anthropic/api_key \
-       --secret-string '{"anthropic_key":"your-key-here"}'
+       --name openai/paper_newsletter_key \
+       --secret-string "{\"openai_key\":\"$OPENAI_PAPER_NEWSLETTER_KEY\"}"
    ```
+
+The Lambda reads the secret from Secrets Manager at runtime. For local testing, either keep `OPENAI_PAPER_NEWSLETTER_KEY` exported or set `OPENAI_SECRET_NAME=openai/paper_newsletter_key`.
 
 3. **Configure Deployment**
    - Copy samconfig.example.toml to samconfig.toml

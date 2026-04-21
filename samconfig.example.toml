@@ -6,5 +6,5 @@ s3_prefix = "papernewsletter"
 region = "us-west-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "Stage=\"prod\" SubLandingPage=\"insertlandingpage.com" SenderEmail=\"Insert Newsletter Name <newsletter@example.com>\" AlertEmail=\"your.email@example.com\" UseDomainIdentity=\"true\" DomainName=\"newsletter.example.com\" HostedZoneId=\"ZXXXXXXXXXX\" ApiGatewayId=\"xxxxxxxxxxxx\"EmailTestMode=\"true\" EmailTestAddress=\"aipapernewsletter@gmail.com\""
+parameter_overrides = "Stage=\"prod\" SubLandingPage=\"https://example.com/newsletter\" SenderEmail=\"Insert Newsletter Name <newsletter@example.com>\" AlertEmail=\"your.email@example.com\" UseDomainIdentity=\"true\" DomainName=\"newsletter.example.com\" HostedZoneId=\"ZXXXXXXXXXX\" ApiGatewayId=\"xxxxxxxxxxxx\" EmailTestMode=\"true\" EmailTestAddress=\"aipapernewsletter@gmail.com\" OpenAIModelCheap=\"gpt-5.4-nano\" OpenAIModelExpensive=\"gpt-5.4-mini\" OpenAIModelFallback=\"gpt-5.4\" OpenAIModelEmergency=\"gpt-5\""
 image_repositories = []

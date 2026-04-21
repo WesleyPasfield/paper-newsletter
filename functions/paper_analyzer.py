@@ -4,7 +4,7 @@ import requests
 import time
 import random
 import math
-from anthropic import APIError, Anthropic
+from openai import APIError, OpenAI
 import json
 from datetime import datetime
 import logging
@@ -156,7 +156,7 @@ class Paper:
 class PaperAnalyzer:
     def __init__(
         self,
-        anthropic_api_key: str,
+        openai_api_key: str,
         eval_prompt: str,
         newsletter_prompt: str,
         previously_included_papers: Set[str] = None,
@@ -166,30 +166,30 @@ class PaperAnalyzer:
         model_emergency: Optional[str] = None
     ):
         """
-        Initialize PaperAnalyzer with configurable Claude models.
+        Initialize PaperAnalyzer with configurable OpenAI models.
 
         Args:
-            anthropic_api_key: Anthropic API key
+            openai_api_key: OpenAI API key
             eval_prompt: Prompt for evaluating papers
             newsletter_prompt: Prompt for generating newsletter
             previously_included_papers: Set of previously included paper titles/links
-            model_cheap: Model for cheap operations (default: claude-haiku-4-5-20251001)
-            model_expensive: Model for expensive operations (default: claude-sonnet-4-5-20250929)
-            model_fallback: Fallback model when rate limited (default: claude-3-7-sonnet-20250219)
-            model_emergency: Emergency fallback model (default: claude-3-haiku-20240307)
+            model_cheap: Model for cheap operations (default: gpt-5.4-nano)
+            model_expensive: Model for expensive operations (default: gpt-5.4-mini)
+            model_fallback: Fallback model when rate limited (default: gpt-5.4)
+            model_emergency: Emergency fallback model (default: gpt-5)
         """
-        self.client = Anthropic(api_key=anthropic_api_key)
+        self.client = OpenAI(api_key=openai_api_key)
 
         # Set models with defaults if not provided
-        self.claude_model_cheap = model_cheap or "claude-haiku-4-5-20251001"
-        self.claude_model_pricey = model_expensive or "claude-sonnet-4-5-20250929"
-        self.claude_model_fallback = model_fallback or "claude-3-7-sonnet-20250219"
-        self.claude_model_emergency = model_emergency or "claude-3-haiku-20240307"
+        self.openai_model_cheap = model_cheap or "gpt-5.4-nano"
+        self.openai_model_pricey = model_expensive or "gpt-5.4-mini"
+        self.openai_model_fallback = model_fallback or "gpt-5.4"
+        self.openai_model_emergency = model_emergency or "gpt-5"
 
-        logger.info(f"Initialized with models - Cheap: {self.claude_model_cheap}, "
-                   f"Expensive: {self.claude_model_pricey}, "
-                   f"Fallback: {self.claude_model_fallback}, "
-                   f"Emergency: {self.claude_model_emergency}")
+        logger.info(f"Initialized with models - Cheap: {self.openai_model_cheap}, "
+                   f"Expensive: {self.openai_model_pricey}, "
+                   f"Fallback: {self.openai_model_fallback}, "
+                   f"Emergency: {self.openai_model_emergency}")
 
         # Track fallback level: 0=normal, 1=fallback, 2=emergency
         self.fallback_level = 0
@@ -233,23 +233,23 @@ class PaperAnalyzer:
         if self.fallback_level == 0:
             self.fallback_level = 1
             logger.warning("Switching to fallback models due to rate limiting")
-            logger.info(f"Using fallback model: {self.claude_model_fallback} for all operations")
+            logger.info(f"Using fallback model: {self.openai_model_fallback} for all operations")
         elif self.fallback_level == 1:
             self.fallback_level = 2
             logger.warning("Switching to emergency fallback models due to continued rate limiting")
-            logger.info(f"Using emergency model: {self.claude_model_emergency} for all operations")
+            logger.info(f"Using emergency model: {self.openai_model_emergency} for all operations")
     
     def _get_current_model(self, is_expensive_operation: bool = False) -> str:
         """Get the current model based on fallback level and operation type"""
         if self.fallback_level == 0:
             # Normal operation
-            model = self.claude_model_pricey if is_expensive_operation else self.claude_model_cheap
+            model = self.openai_model_pricey if is_expensive_operation else self.openai_model_cheap
         elif self.fallback_level == 1:
-            # First fallback - use latest Haiku for everything
-            model = self.claude_model_fallback
+            # First fallback - use configured fallback for everything
+            model = self.openai_model_fallback
         else:
-            # Emergency fallback - use oldest Haiku for everything
-            model = self.claude_model_emergency
+            # Emergency fallback - use configured emergency fallback for everything
+            model = self.openai_model_emergency
         
         logger.debug(f"Using model: {model} (fallback level: {self.fallback_level})")
         return model
@@ -283,6 +283,18 @@ class PaperAnalyzer:
 
     def _classify_error(self, error: APIError) -> str:
         """Classify API errors for better handling and logging."""
+        status_code = getattr(error, 'status_code', None)
+        if status_code == 429:
+            return "rate_limit"
+        elif status_code == 401:
+            return "authentication"
+        elif status_code == 403:
+            return "authorization"
+        elif status_code and 400 <= status_code < 500:
+            return "client_error"
+        elif status_code and 500 <= status_code < 600:
+            return "server_error"
+
         if hasattr(error, 'response') and error.response is not None:
             status_code = getattr(error.response, 'status_code', None)
             if status_code == 429:
@@ -291,9 +303,9 @@ class PaperAnalyzer:
                 return "authentication"
             elif status_code == 403:
                 return "authorization"
-            elif 400 <= status_code < 500:
+            elif status_code and 400 <= status_code < 500:
                 return "client_error"
-            elif 500 <= status_code < 600:
+            elif status_code and 500 <= status_code < 600:
                 return "server_error"
         
         # Check error message for common patterns
@@ -308,6 +320,34 @@ class PaperAnalyzer:
             return "authorization"
         
         return "unknown"
+
+    def _create_text_response(self, model: str, instructions: str, prompt: str, max_output_tokens: int) -> str:
+        response = self.client.responses.create(
+            model=model,
+            instructions=instructions,
+            input=prompt,
+            max_output_tokens=max_output_tokens
+        )
+        return self._extract_response_text(response)
+
+    def _extract_response_text(self, response) -> str:
+        text = getattr(response, "output_text", None)
+        if text:
+            return text
+
+        output = getattr(response, "output", None) or []
+        text_parts = []
+        for item in output:
+            content = getattr(item, "content", None) or []
+            for content_item in content:
+                content_text = getattr(content_item, "text", None)
+                if content_text:
+                    text_parts.append(content_text)
+
+        if text_parts:
+            return "\n".join(text_parts)
+
+        raise ValueError("Could not extract text from OpenAI response")
 
     def api_call_with_retry(self, max_retries: int = 5, initial_delay: float = 1.0, func=None):
         """
@@ -428,10 +468,12 @@ class PaperAnalyzer:
         is_rate_limit = False
         is_input_token_acceleration = False
         retry_after = None
+        status_code = getattr(error, 'status_code', None)
+        is_rate_limit = status_code == 429
         
         if hasattr(error, 'response') and error.response is not None:
             status_code = getattr(error.response, 'status_code', None)
-            is_rate_limit = status_code == 429
+            is_rate_limit = is_rate_limit or status_code == 429
             
             # Try to parse Retry-After header for more intelligent backoff
             if is_rate_limit:
@@ -487,21 +529,23 @@ class PaperAnalyzer:
 
     def evaluate_title(self, paper: Paper) -> float:
         def _make_call():
+            response_text = ""
             try:
                 # Use appropriate model based on fallback level
-                model = self._get_current_model(is_expensive_operation=True)
-                
-                response = self.client.messages.create(
+                model = self._get_current_model(is_expensive_operation=False)
+
+                response_text = self._create_text_response(
                     model=model,
-                    system=self.eval_prompt,
-                    max_tokens=4,
-                    messages=[{"role": "user", "content": f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}"}]
-                )
-                score_text = response.content[0].text.strip()
-                score = float(score_text) 
+                    instructions=self.eval_prompt,
+                    prompt=f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}",
+                    max_output_tokens=16
+                ).strip()
+                score = float(response_text)
                 return score if 0 <= score <= 1 else 0.0
+            except APIError:
+                raise
             except (ValueError, IndexError, AttributeError) as e:
-                logger.warning(f"Could not extract float from title evaluation response for '{paper.title}': {str(e)}. Response: {getattr(response, 'content', 'N/A')}")
+                logger.warning(f"Could not extract float from title evaluation response for '{paper.title}': {str(e)}. Response: {response_text or 'N/A'}")
                 # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
                 return 0.5
             except Exception as e:
@@ -517,21 +561,23 @@ class PaperAnalyzer:
 
     def evaluate_abstract(self, paper: Paper) -> float:
         def _make_call():
+            response_text = ""
             try:
                 # Use appropriate model based on fallback level
-                model = self._get_current_model(is_expensive_operation=False)
-                
-                response = self.client.messages.create(
+                model = self._get_current_model(is_expensive_operation=True)
+
+                response_text = self._create_text_response(
                     model=model,
-                    system=self.eval_prompt,
-                    max_tokens=4,
-                    messages=[{"role": "user", "content": f"Based on the abstract, rate interest between 0 and 1 on a numeric scale:\n{paper.abstract}"}]
-                )
-                score_text = response.content[0].text.strip()
-                score = float(score_text)
+                    instructions=self.eval_prompt,
+                    prompt=f"Based on the abstract, rate interest between 0 and 1 on a numeric scale:\n{paper.abstract}",
+                    max_output_tokens=16
+                ).strip()
+                score = float(response_text)
                 return score if 0 <= score <= 1 else 0.0
+            except APIError:
+                raise
             except (ValueError, IndexError, AttributeError) as e:
-                logger.warning(f"Could not extract float from abstract evaluation response for '{paper.title}': {str(e)}. Response: {getattr(response, 'content', 'N/A')}")
+                logger.warning(f"Could not extract float from abstract evaluation response for '{paper.title}': {str(e)}. Response: {response_text or 'N/A'}")
                 # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
                 return 0.5
             except Exception as e:
@@ -610,58 +656,19 @@ Additional Papers. These should not receive a summary in the JSON response:
             # Use appropriate model based on fallback level
             model = self._get_current_model(is_expensive_operation=True)
             
-            # Note: Structured outputs require SDK >= 0.34.0 and specific model versions
-            # For now, we'll rely on the improved prompt to generate valid JSON
-            # Structured outputs can be enabled later when SDK is updated
-            logger.info(f"Using regular API call for model {model} with improved JSON formatting prompt")
+            logger.info(f"Using OpenAI Responses API for model {model} with improved JSON formatting prompt")
             
             try:
-                # Make the API call
-                response = self.client.messages.create(
+                text_content = self._create_text_response(
                     model=model,
-                    system=self.newsletter_prompt,
-                    max_tokens=8000,
-                    messages=[{"role": "user", "content": prompt}]
+                    instructions=self.newsletter_prompt,
+                    prompt=prompt,
+                    max_output_tokens=8000
                 )
-                
-                # Immediately check if we got a valid response
-                if response is None:
-                    raise ValueError("API returned None response")
-                
-                # CRITICAL: Try to access content immediately, using the same pattern as evaluate_title
-                # This works for evaluate_title, so it should work here too
-                try:
-                    # Access content the same way as the working methods
-                    text_content = response.content[0].text
-                    if text_content:
-                        logger.info(f"Successfully extracted {len(text_content)} characters from API response")
-                        return text_content
-                    else:
-                        logger.error("response.content[0].text exists but is empty or None")
-                except (IndexError, AttributeError) as e:
-                    # If direct access fails, log detailed diagnostics
-                    logger.error(f"Direct access failed: {str(e)}")
-                    logger.error(f"Response type: {type(response)}")
-                    logger.error(f"Response has content: {hasattr(response, 'content')}")
-                    
-                    if hasattr(response, 'content'):
-                        content_value = response.content
-                        logger.error(f"Response.content type: {type(content_value)}")
-                        logger.error(f"Response.content value: {content_value}")
-                        logger.error(f"Response.content length: {len(content_value) if content_value else 'None'}")
-                        
-                        # Check stop_reason and usage
-                        stop_reason = getattr(response, 'stop_reason', 'unknown')
-                        stop_sequence = getattr(response, 'stop_sequence', None)
-                        usage = getattr(response, 'usage', None)
-                        logger.error(f"stop_reason: {stop_reason}, stop_sequence: {stop_sequence}, usage: {usage}")
-                        
-                        if usage:
-                            logger.error(f"  Input tokens: {getattr(usage, 'input_tokens', 'N/A')}")
-                            logger.error(f"  Output tokens: {getattr(usage, 'output_tokens', 'N/A')}")
-                    
-                    raise ValueError(f"Could not extract text from response: {str(e)}")
-                    
+                if text_content:
+                    logger.info(f"Successfully extracted {len(text_content)} characters from API response")
+                    return text_content
+                raise ValueError("API returned empty text response")
             except Exception as e:
                 logger.error(f"API call failed with exception: {str(e)}")
                 logger.error(f"Exception type: {type(e).__name__}")

@@ -258,7 +258,11 @@ class DuplicateDetector:
 
 def get_secret():
     try:
-        secret_name = "anthropic/api_key"
+        env_key = os.environ.get('OPENAI_PAPER_NEWSLETTER_KEY') or os.environ.get('OPENAI_API_KEY')
+        if env_key:
+            return env_key
+
+        secret_name = os.environ.get('OPENAI_SECRET_NAME', "openai/paper_newsletter_key")
         region_name = os.environ.get('AWS_REGION', 'us-west-2')
         
         session = boto3.session.Session()
@@ -272,9 +276,9 @@ def get_secret():
         if 'SecretString' in get_secret_value_response:
             try:
                 secret = json.loads(get_secret_value_response['SecretString'])
-                if 'anthropic_key' not in secret:
-                    raise ValueError("Secret missing anthropic_key")
-                return secret['anthropic_key']
+                if 'openai_key' not in secret:
+                    raise ValueError("Secret missing openai_key")
+                return secret['openai_key']
             except json.JSONDecodeError:
                 raise ValueError("Secret is not valid JSON")
         else:
@@ -286,7 +290,6 @@ def get_secret():
 def validate_environment_variables():
     """Validate all required environment variables are present"""
     required_vars = [
-        'ANTHROPIC_API_KEY',
         'SUBSCRIBERS_TABLE',
         'SENDER_EMAIL',
         'NEWSLETTER_BUCKET',
@@ -812,7 +815,7 @@ def process_newsletter_content(content: str) -> Dict:
 
     try:
         # Step 1: Handle markdown code blocks (```json ... ``` or ``` ... ```)
-        # Claude may wrap JSON in code blocks even though we ask it not to
+        # Models may wrap JSON in code blocks even though we ask them not to
         if '```' in content:
             # Find all code blocks
             code_block_pattern = r'```(?:json)?\s*\n(.*?)\n```'
@@ -1092,17 +1095,17 @@ def lambda_handler(event, context):
         start_time = datetime.now()
         logger.info(f"Starting newsletter generation at {start_time}")
         
-        anthropic_api_key = get_secret()
+        openai_api_key = get_secret()
         
         # Get previously included papers first
         previously_included = get_previously_included_papers()
         logger.info(f"Found {len(previously_included)} previously included papers")
 
         # Get model configurations from environment variables (with defaults)
-        model_cheap = os.environ.get('CLAUDE_MODEL_CHEAP')
-        model_expensive = os.environ.get('CLAUDE_MODEL_EXPENSIVE')
-        model_fallback = os.environ.get('CLAUDE_MODEL_FALLBACK')
-        model_emergency = os.environ.get('CLAUDE_MODEL_EMERGENCY')
+        model_cheap = os.environ.get('OPENAI_MODEL_CHEAP')
+        model_expensive = os.environ.get('OPENAI_MODEL_EXPENSIVE')
+        model_fallback = os.environ.get('OPENAI_MODEL_FALLBACK')
+        model_emergency = os.environ.get('OPENAI_MODEL_EMERGENCY')
 
         logger.info(f"Model configuration from environment: "
                    f"Cheap={model_cheap or 'default'}, "
@@ -1111,7 +1114,7 @@ def lambda_handler(event, context):
                    f"Emergency={model_emergency or 'default'}")
 
         analyzer = PaperAnalyzer(
-            anthropic_api_key=anthropic_api_key,
+            openai_api_key=openai_api_key,
             eval_prompt=EVAL_PROMPT,
             newsletter_prompt=NEWSLETTER_PROMPT,
             previously_included_papers=previously_included,
