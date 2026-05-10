@@ -19,33 +19,36 @@ EVAL_PROMPT = """
 ### Role
 You are evaluating academic papers for a researcher specializing in the transition from "Experimental AI" to "Reliable AI Systems."
 
-### 1. The Agentic Shift & Economic Impact:
-- **Agentic Infrastructure:** Research on memory mechanisms, "Agent-as-a-Judge," and file system abstractions for LLMs.
-- **Labor Transformation:** Concrete studies on how agents (not just chatbots) impact knowledge work and business viability.
-- **Human-Agent Interaction:** Frameworks for collaboration and the "End of Reward Engineering" in multi-agent systems.
+### 1. Reliable AI Systems:
+- **Agent Improvement Loops:** Papers where humans, traces, evals, field failures, or model critiques update goals, rubrics, prompts, tools, policies, or implementation plans.
+- **Runtime Feedback Signals:** Human feedback used during operation, especially when it changes the agent's objective, policy, evaluation criteria, or next implementation step.
+- **System Reliability Under Use:** Methods that turn production failures, customer failures, or long-running agent traces into evals, model improvements, SDK features, or runtime changes.
+- **Hybrid & Deterministic Systems:** Combining LLMs with structured code, APIs, typed tools, workflow engines, or deterministic checks to make agent behavior more reliable.
 
-### 2. Agent Evaluation
-- **Agent-as-a-Judge:** Evaluating agents with agents.
-- **Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge:** Integration of human feedback into agent evaluation
-- **Agent Skills** Skills impact on agent performance and reliability 
-- **Rubrics** Shift from monolithic agent as judge to modular rubrics
+### 2. Agent Evaluation:
+- **Enterprise Workflow Evals:** Benchmarks and domain-specific evals for agents operating inside real business processes, especially stateful or long-horizon tasks.
+- **Tool Use Reliability:** Measuring and improving tool selection, tool execution, recovery from tool errors, and reliability across multi-step tasks.
+- **Agent-as-a-Judge and Rubrics:** Evaluating agents with agents, modular rubrics, judge calibration, trace review, and domain-specific evaluation sets.
+- **Skills and Agent Capabilities:** How agent skills, tool runtimes, orchestration, or workflow abstractions change agent reliability and task success.
 
-### 3. Engineering-First Technical Focus:
-- **Metrology (Judging the Judges):** Critical analysis of LLM-based evaluation, synthetic data quality, and benchmark vulnerability.
-- **Hybrid & Deterministic Systems:** Combining neural LLMs with structured code, APIs, or deterministic logic.
-- **Production Architectures:** Context engineering (Context 2.0), RAG evolution, and converting research demos into resilient apps.
-- **Optimization:** Scaling test-time compute vs. parameter scaling.
-- **Human steered self-improvement** Human feedback in natural language as a guide for agent self-improvement
+### 3. Production Agent Architectures:
+- **Context, Memory, and State:** Context engineering, memory mechanisms, retrieval, file-system abstractions, state management, and context governance.
+- **Agent SDKs and Orchestration:** Agent SDKs, tool-use runtimes, orchestration frameworks, multi-agent coordination, and production deployment patterns.
+- **Realtime and Multimodal Agents:** Voice/audio agents, realtime interaction, latency, interruption handling, spoken tool use, and multimodal agent interfaces.
+- **Production Architectures:** Converting research demos into resilient applications through observability, evaluation loops, context layers, and operational feedback.
 
-### 4. Governance & Regulatory Frameworks:
-- **Beyond Compute Caps:** Practical regulation focusing on data-driven evaluation rather than hardware thresholds.
-- **Certification & Safety:** Standardized testing for production deployment and domain-specific safety (e.g., clinical or legal).
-- **Inference Governance:** How test-time optimizations (scaling compute at inference) change the risk and governance profile of a model.
+### 4. Governance, Labor, and Impact:
+- **Governance and Certification:** Practical regulation, certification, safety testing, and inference governance for deployed AI systems.
+- **Labor Transformation:** Concrete empirical studies on how agents affect knowledge work, business processes, and organizational adoption.
+- **Policy and Risk:** Prefer papers with measurable system behavior, deployment evidence, or specific evaluation methods over broad commentary.
 
 ### Scoring Logic Refinement:
-- **Preference for "Post-Training" over "Pre-Training":** High scores for papers focusing on alignment, evaluation, and inference-time logic.
-- **The "Vulnerability" Signal:** High scores for papers that identify flaws in current SOTA evaluation methods (e.g., MT-Bench bias).
-- **The "Agentic" Signal:** High scores for papers treating LLMs as components of a larger system (Memory, Tools, File Systems) rather than isolated text generators.
+- **Production Agent Signal:** High scores for papers that help understand, evaluate, or build production agent systems.
+- **Feedback Loop Signal:** High scores for work where feedback, traces, evals, or failures change goals, rubrics, prompts, tools, policies, or implementation plans.
+- **Enterprise and Long-Horizon Signal:** High scores for papers about agents in real workflows, domain-specific business tasks, stateful execution, or long-horizon tool use.
+- **Context and Runtime Signal:** High scores for papers about context layers, memory, retrieval, state, realtime/voice agents, tool runtimes, or orchestration.
+- **Metrology Signal:** High scores for papers that identify flaws in evaluation methods or propose better measurements for agent reliability.
+- **Lower Priority Signal:** Pre-training, generic model capability benchmarks, broad policy commentary, or general economic impact should score lower unless tied to concrete deployment, evaluation, or reliable system behavior.
 
 Here are some example paper titles that I have found interesting lately for additional context:
 
@@ -80,10 +83,11 @@ Rate papers 0-1 based on on a numeric scale:
 - Similarity to example papers provided. If paper titles are not similar it should not be a disqualifying factor, but if paper titles are similar it should be a very strong positive signal.
 
 0.0 indicates absolutely no relevance
-0.25 indicates some relevance in one of the areas of interest
-0.5 indicates either significant relevance in one area of interest, or relevance across multiple area of interest
-0.75 and above indicates significant alignment with areas of interest
-The score can be within those ranges provided as well if unclear or ambiguous
+0.25 indicates weak or generic relevance
+0.5 indicates borderline relevance, usually not enough unless the paper clearly connects to one of the priority areas
+0.6 indicates clear relevance to one priority area
+0.75 and above indicates significant alignment with production agents, agent evaluation, reliable AI systems, or production architecture
+The score can be within those ranges provided as well if unclear or ambiguous. Do not inflate unclear papers above 0.5.
 
 Provide a response that ONLY contains the rated score and no other text:
 

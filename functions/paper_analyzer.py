@@ -546,17 +546,16 @@ class PaperAnalyzer:
                 raise
             except (ValueError, IndexError, AttributeError) as e:
                 logger.warning(f"Could not extract float from title evaluation response for '{paper.title}': {str(e)}. Response: {response_text or 'N/A'}")
-                # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
-                return 0.5
+                return -1.0
             except Exception as e:
                 logger.warning(f"Unexpected error in title evaluation for '{paper.title}': {str(e)}")
-                return 0.5
+                return -1.0
 
         result = self.api_call_with_retry(func=_make_call)
-        # If API call failed completely (returned 0.0), use neutral score to avoid false negatives
+        # If API call failed completely, keep the score below any relaxed threshold.
         if result == 0.0:
-            logger.warning(f"Title evaluation API call failed for '{paper.title}', using neutral score 0.5")
-            return 0.5
+            logger.warning(f"Title evaluation API call failed for '{paper.title}', using failed score -1.0")
+            return -1.0
         return result
 
     def evaluate_abstract(self, paper: Paper) -> float:
@@ -578,17 +577,16 @@ class PaperAnalyzer:
                 raise
             except (ValueError, IndexError, AttributeError) as e:
                 logger.warning(f"Could not extract float from abstract evaluation response for '{paper.title}': {str(e)}. Response: {response_text or 'N/A'}")
-                # Return a neutral score instead of 0.0 to avoid filtering out potentially good papers
-                return 0.5
+                return -1.0
             except Exception as e:
                 logger.warning(f"Unexpected error in abstract evaluation for '{paper.title}': {str(e)}")
-                return 0.5
+                return -1.0
 
         result = self.api_call_with_retry(func=_make_call)
-        # If API call failed completely (returned 0.0), use neutral score to avoid false negatives
+        # If API call failed completely, keep the score below any relaxed threshold.
         if result == 0.0:
-            logger.warning(f"Abstract evaluation API call failed for '{paper.title}', using neutral score 0.5")
-            return 0.5
+            logger.warning(f"Abstract evaluation API call failed for '{paper.title}', using failed score -1.0")
+            return -1.0
         return result
 
     def create_newsletter(self, papers: list[Paper], papers_without_content: list[Paper]) -> str:
