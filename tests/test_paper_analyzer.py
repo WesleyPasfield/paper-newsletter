@@ -31,6 +31,32 @@ class PaperAnalyzerModelTests(unittest.TestCase):
         self.assertEqual(analyzer.openai_model_emergency, 'gpt-5.5')
         openai_client.assert_called_once_with(api_key='test-key')
 
+    def test_repeated_rate_limits_advance_through_fallbacks(self):
+        analyzer = PaperAnalyzer.__new__(PaperAnalyzer)
+        analyzer.fallback_level = 0
+        analyzer.consecutive_rate_limit_failures = 0
+        analyzer.openai_model_fallback = 'gpt-5.6-sol'
+        analyzer.openai_model_emergency = 'gpt-5.5'
+
+        for _ in range(3):
+            analyzer._record_standard_rate_limit()
+        self.assertEqual(analyzer.fallback_level, 1)
+        self.assertEqual(analyzer.consecutive_rate_limit_failures, 0)
+
+        for _ in range(3):
+            analyzer._record_standard_rate_limit()
+        self.assertEqual(analyzer.fallback_level, 2)
+
+    def test_input_token_acceleration_takes_precedence_over_429(self):
+        error = MagicMock(status_code=429)
+        error.__str__.return_value = 'Input tokens acceleration limit exceeded'
+        analyzer = PaperAnalyzer.__new__(PaperAnalyzer)
+
+        self.assertEqual(
+            analyzer._classify_error(error),
+            'input_token_acceleration',
+        )
+
     def test_text_response_passes_reasoning_effort(self):
         analyzer = PaperAnalyzer.__new__(PaperAnalyzer)
         analyzer.client = MagicMock()

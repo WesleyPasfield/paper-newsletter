@@ -218,6 +218,7 @@ class PaperAnalyzer:
         self.last_api_call_time = 0.0
         self.min_api_interval = 0.1  # Minimum 100ms between API calls
         self.recent_rate_limit_failures = 0  # Track recent rate limit failures
+        self.consecutive_rate_limit_failures = 0
         self.input_token_acceleration_limit = False  # Track if we hit input token acceleration limit
 
         logger.info(f"Initialized PaperAnalyzer with {len(self.previously_included_papers)} previously included papers")
@@ -237,6 +238,17 @@ class PaperAnalyzer:
             self.fallback_level = 2
             logger.warning("Switching to emergency fallback models due to continued rate limiting")
             logger.info(f"Using emergency model: {self.openai_model_emergency} for all operations")
+
+    def _record_standard_rate_limit(self) -> None:
+        """Advance the model fallback after three consecutive standard rate limits."""
+        self.consecutive_rate_limit_failures += 1
+        if self.consecutive_rate_limit_failures < 3:
+            return
+
+        previous_level = self.fallback_level
+        self._switch_to_fallback_models()
+        if self.fallback_level != previous_level:
+            self.consecutive_rate_limit_failures = 0
     
     def _get_current_model(self, is_expensive_operation: bool = False) -> str:
         """Get the current model based on fallback level and operation type"""
@@ -282,6 +294,10 @@ class PaperAnalyzer:
 
     def _classify_error(self, error: APIError) -> str:
         """Classify API errors for better handling and logging."""
+        error_msg = str(error).lower()
+        if "input tokens" in error_msg and "acceleration" in error_msg:
+            return "input_token_acceleration"
+
         status_code = getattr(error, 'status_code', None)
         if status_code == 429:
             return "rate_limit"
@@ -308,11 +324,8 @@ class PaperAnalyzer:
                 return "server_error"
         
         # Check error message for common patterns
-        error_msg = str(error).lower()
         if "rate limit" in error_msg or "too many requests" in error_msg:
             return "rate_limit"
-        elif "input tokens" in error_msg and "acceleration" in error_msg:
-            return "input_token_acceleration"
         elif "unauthorized" in error_msg or "invalid api key" in error_msg:
             return "authentication"
         elif "forbidden" in error_msg:
@@ -391,6 +404,7 @@ class PaperAnalyzer:
 
                     # Reset rate limit failure count on successful calls
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
+                    self.consecutive_rate_limit_failures = 0
 
                     # Log metrics periodically
                     if self.metrics.total_requests % 10 == 0:
@@ -417,6 +431,7 @@ class PaperAnalyzer:
                 # Track rate limit failures for adaptive rate limiting
                 if error_type == "rate_limit":
                     self.recent_rate_limit_failures += 1
+                    self._record_standard_rate_limit()
                     # Decay the failure count over time (reset after 10 successful calls)
                     if self.recent_rate_limit_failures > 10:
                         self.recent_rate_limit_failures = 10
@@ -432,6 +447,7 @@ class PaperAnalyzer:
                     logger.warning("Input token acceleration limit detected - using extended backoff")
                     # Switch to fallback models to reduce token usage
                     self._switch_to_fallback_models()
+                    self.consecutive_rate_limit_failures = 0
 
                     # Be much more conservative with rate
                     self.token_bucket.rate = min(self.token_bucket.rate, 0.5)  # Max 1 request per 2 seconds
@@ -439,6 +455,7 @@ class PaperAnalyzer:
                 else:
                     # Reset failure count on non-rate-limit errors
                     self.recent_rate_limit_failures = max(0, self.recent_rate_limit_failures - 1)
+                    self.consecutive_rate_limit_failures = 0
 
                 # Don't retry certain types of errors
                 if error_type in ["authentication", "authorization"]:
