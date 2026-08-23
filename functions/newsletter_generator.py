@@ -5,10 +5,8 @@ from .paper_analyzer import PaperAnalyzer
 from .email_sender import send_newsletter
 import logging
 from datetime import datetime
-import codecs
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, Set, Tuple, Optional
 import boto3
-from botocore.exceptions import ClientError
 import re
 from difflib import SequenceMatcher
 
@@ -187,13 +185,13 @@ def is_duplicate_paper(title: str, link: str, previously_included: Set[str],
 
     # Check for exact title match
     if title_lower in previously_included:
-        return True, f"Exact title match"
+        return True, "Exact title match"
 
     # Check for exact link match (with normalization)
     for prev_item in previously_included:
         if prev_item.startswith('http'):
             if normalize_arxiv_link(prev_item) == link_normalized:
-                return True, f"Exact link match (normalized)"
+                return True, "Exact link match (normalized)"
 
     # Check for fuzzy title match (for similar but not identical titles)
     for prev_item in previously_included:
@@ -562,8 +560,8 @@ def extract_json_from_text(content: str) -> str:
                             if isinstance(parsed, list):
                                 logger.warning(f"Extracted JSON array instead of object: {extracted[:100]}...")
                             return extracted
-                        except:
-                            pass
+                        except json.JSONDecodeError:
+                            continue
 
     return content
 
@@ -934,18 +932,15 @@ def get_previously_included_papers() -> Set[str]:
     bucket_name = os.environ['NEWSLETTER_BUCKET']
     
     try:
-        # List all objects in the newsletters folder
-        response = s3_client.list_objects_v2(
-            Bucket=bucket_name,
-            Prefix='newsletters/'
-        )
-        
-        if 'Contents' not in response:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        files = []
+        for page in paginator.paginate(Bucket=bucket_name, Prefix='newsletters/'):
+            files.extend(page.get('Contents', []))
+
+        if not files:
             logger.info("No previous newsletters found in S3")
             return set()
-        
-        # Log what files are being processed
-        files = response.get('Contents', [])
+
         logger.info(f"Found {len(files)} newsletter files in S3")
         for obj in files[:5]:  # Show first 5 files
             logger.info(f"  Processing file: {obj['Key']} (modified: {obj['LastModified']})")
@@ -1185,13 +1180,7 @@ def lambda_handler(event, context):
             
         except Exception as e:
             logger.error(f"Error processing newsletter content: {str(e)}")
-            return {
-                'statusCode': 500,
-                'body': json.dumps({
-                    'error': 'Newsletter generation failed',
-                    'message': str(e)
-                })
-            }
+            raise
         
         if not json_content['featured_papers'] and not json_content['additional_papers']:
             logger.warning("No papers met the criteria for inclusion in the newsletter")
@@ -1208,7 +1197,13 @@ def lambda_handler(event, context):
             json_content=json_content,
             table_name=os.environ['SUBSCRIBERS_TABLE'],
             sender=os.environ['SENDER_EMAIL'],
+            api_url=(event or {}).get('api_url') or os.environ.get('API_URL', ''),
         )
+
+        if email_results.get('failed', 0) and not email_results.get('successful', 0):
+            raise RuntimeError(f"Newsletter delivery failed for every recipient: {email_results['failures']}")
+        if email_results.get('failed', 0):
+            logger.error(f"Newsletter delivery completed with partial failures: {email_results}")
 
         s3_location = store_newsletter(json_content)
         logger.info(f"Newsletter stored at: {s3_location}")
@@ -1238,10 +1233,4 @@ def lambda_handler(event, context):
         
     except Exception as e:
         logger.error(f"Error in lambda execution: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'error': 'Internal server error',
-                'message': str(e)
-            })
-        }
+        raise

@@ -11,15 +11,19 @@ Parameters:
   SenderEmail:
     Type: String
     Description: Verified SES sender email address
+  SenderName:
+    Type: String
+    Default: ""
+    Description: Optional display name used in the From header
   AlertEmail:
     Type: String
     Description: Email to receive error alerts
   UseDomainIdentity:
     Type: String
-    Default: false
+    Default: "false"
     AllowedValues:
-      - true
-      - false
+      - "true"
+      - "false"
     Description: Set to true if using a custom domain for sending emails
   DomainName:
     Type: String
@@ -29,17 +33,20 @@ Parameters:
     Type: String
     Default: ""
     Description: (Optional) Route 53 Hosted Zone ID for the domain
-  ApiGatewayId:
-    Default: ""
+  TrackingDomainName:
     Type: String
-    Description: API Gateway ID for constructing URLs. Avoids circular dependency with API Gateway and Lambdas
+    Default: ""
+    Description: Optional SES click-tracking domain. Configure its DNS/CDN separately before setting this value
   SubLandingPage:
     Type: String
-    Default: ""
+    AllowedPattern: "^https://.+"
     Description: URL for subscription landing page
   EmailTestMode:
     Type: String
-    Default: ""
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
     Description: Set to "true" to enable email test mode
   EmailTestAddress:
     Type: String
@@ -65,10 +72,12 @@ Parameters:
 Conditions:
   CreateDomainIdentity: !Equals 
     - !Ref UseDomainIdentity
-    - true
+    - "true"
   HasHostedZone: !And
     - !Not [!Equals [!Ref HostedZoneId, ""]]
     - !Condition CreateDomainIdentity
+  HasSenderName: !Not [!Equals [!Ref SenderName, ""]]
+  HasTrackingDomain: !Not [!Equals [!Ref TrackingDomainName, ""]]
 
 Globals:
   Function:
@@ -82,8 +91,10 @@ Globals:
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
         Stage: !Ref Stage
         ALERT_EMAIL: !Ref AlertEmail
-        SENDER_EMAIL: !Ref SenderEmail
-        API_URL: !Sub "https://${ApiGatewayId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+        SENDER_EMAIL: !If
+          - HasSenderName
+          - !Sub "${SenderName} <${SenderEmail}>"
+          - !Ref SenderEmail
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
         EMAIL_TEST_MODE: !Ref EmailTestMode
         EMAIL_TEST_ADDRESS: !Ref EmailTestAddress
@@ -91,6 +102,8 @@ Globals:
         OPENAI_MODEL_EXPENSIVE: !Ref OpenAIModelExpensive
         OPENAI_MODEL_FALLBACK: !Ref OpenAIModelFallback
         OPENAI_MODEL_EMERGENCY: !Ref OpenAIModelEmergency
+        VERIFICATION_TEMPLATE_NAME: !Sub "${AWS::StackName}-verification-template"
+        NEWSLETTER_TEMPLATE_NAME: !Sub "${AWS::StackName}-newsletter-template"
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
@@ -116,7 +129,7 @@ Resources:
         - ResourcePath: "/*"
           HttpMethod: "*"
           MetricsEnabled: true
-          DataTraceEnabled: true
+          DataTraceEnabled: false
           LoggingLevel: INFO
 
   # Define DynamoDB table before functions that depend on it
@@ -152,15 +165,14 @@ Resources:
         TlsPolicy: REQUIRE
       ReputationOptions:
         ReputationMetricsEnabled: true
-      TrackingOptions:
-        CustomRedirectDomain: !Ref DomainName
+      TrackingOptions: !If
+        - HasTrackingDomain
+        - CustomRedirectDomain: !Ref TrackingDomainName
+        - !Ref AWS::NoValue
 
   # Lambda Functions
   NewsletterFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
-      - EmailConfigurationSet
     Properties:
       CodeUri: .
       Handler: functions.newsletter_generator.lambda_handler
@@ -202,17 +214,14 @@ Resources:
             Name: !Sub "${AWS::StackName}-newsletter-schedule-event"
             Description: "Newsletter generation schedule event"
             Enabled: true
+            Input: !Sub '{"api_url":"https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"}'
 
   SubscribeFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
+    DependsOn: VerificationTemplate
     Properties:
       CodeUri: .
       Handler: functions.email_sender.add_subscriber
-      Environment:
-        Variables:
-          API_DOMAIN: !Sub "${AWS::Region}-${AWS::AccountId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
@@ -238,15 +247,12 @@ Resources:
 
   VerifyFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
     Properties:
       CodeUri: .
       Handler: functions.email_sender.verify_subscriber
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
-          SENDER_EMAIL: !Ref SenderEmail
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
@@ -278,8 +284,7 @@ Resources:
 
   VerificationReminderFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
+    DependsOn: VerificationTemplate
     Properties:
       CodeUri: .
       Handler: functions.email_sender.check_and_resend_verifications
@@ -287,8 +292,6 @@ Resources:
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
-          SENDER_EMAIL: !Ref SenderEmail
-          API_URL: !Sub "${AWS::Region}-${AWS::AccountId}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
@@ -300,6 +303,10 @@ Resources:
                 - ses:SendEmail
                 - ses:GetTemplate
               Resource: "*"
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
       Events:
         Schedule:
           Type: Schedule
@@ -308,6 +315,7 @@ Resources:
             Name: !Sub "${AWS::StackName}-verification-reminder-schedule"
             Description: "Check for unverified subscribers hourly"
             Enabled: true
+            Input: !Sub '{"api_url":"https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"}'
 
   VerificationReminderDashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -324,7 +332,6 @@ Resources:
                 "metrics": [
                   [ "Newsletter/Verification", "ReminderEmailSuccess", { "stat": "Sum" } ],
                   [ ".", "ReminderEmailFailure", { "stat": "Sum" } ],
-                  [ ".", "ReminderProcessingError", { "stat": "Sum" } ],
                   [ ".", "ReminderSystemError", { "stat": "Sum" } ]
                 ],
                 "period": 3600,
@@ -366,15 +373,12 @@ Resources:
 
   UnsubscribeFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
     Properties:
       CodeUri: .
       Handler: functions.email_sender.unsubscribe_handler
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
-          SENDER_EMAIL: !Ref SenderEmail
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
@@ -395,11 +399,17 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
+        UnsubscribePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /unsubscribe
+            Method: POST
+            Auth:
+              Authorizer: NONE
 
   SubscriberMetricsFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
     Properties:
       CodeUri: .
       Handler: functions.email_sender.sub_status_checker
@@ -416,6 +426,8 @@ Resources:
             RestApiId: !Ref ApiGatewayApi
             Path: /metrics
             Method: GET
+            Auth:
+              Authorizer: AWS_IAM
         MetricsOptions:
           Type: Api
           Properties:
@@ -425,15 +437,17 @@ Resources:
 
   BulkVerifierFunction:
     Type: AWS::Serverless::Function
-    DependsOn: 
-      - SubscribersTable
-      - EmailConfigurationSet
+    DependsOn: VerificationTemplate
     Properties:
       CodeUri: .
       Handler: functions.email_sender.bulk_verifier
       Description: "Manually triggered bulk verification reminder sender"
+      Timeout: 300
+      Environment:
+        Variables:
+          BULK_VERIFICATION_SEND_RATE: "10"
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
@@ -448,6 +462,8 @@ Resources:
             RestApiId: !Ref ApiGatewayApi
             Path: /bulk-verify
             Method: POST
+            Auth:
+              Authorizer: AWS_IAM
         BulkVerifyOptions:
           Type: Api
           Properties:
@@ -470,7 +486,6 @@ Resources:
 
   NewsletterFunctionErrorAlarm:
     Type: AWS::CloudWatch::Alarm
-    DependsOn: NewsletterFunction
     Properties:
       AlarmDescription: !Sub "Alert when ${NewsletterFunction} has errors"
       MetricName: Errors
@@ -484,6 +499,42 @@ Resources:
       Dimensions:
         - Name: FunctionName
           Value: !Ref NewsletterFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  VerifyFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${VerifyFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref VerifyFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  VerificationReminderFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${VerificationReminderFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref VerificationReminderFunction
       AlarmActions:
         - !Ref AlarmTopic
 
@@ -513,8 +564,6 @@ Resources:
             Action:
               - s3:PutObject
               - s3:GetObject
-              - s3:ListObjects
-              - s3:ListObjectsV2
             Resource: !Sub "${NewsletterBucket.Arn}/*"
           - Effect: Allow
             Action:
@@ -526,7 +575,12 @@ Resources:
   EmailIdentity: # Single email identify verification
     Type: AWS::SES::EmailIdentity
     Properties:
-      EmailIdentity: !Ref SenderEmail
+      # Preserve the existing stack resource identifier while Lambda uses the
+      # separately composed From header from Globals.Function.Environment.
+      EmailIdentity: !If
+        - HasSenderName
+        - !Sub "${SenderName} <${SenderEmail}>"
+        - !Ref SenderEmail
       ConfigurationSetAttributes:
         ConfigurationSetName: !Ref EmailConfigurationSet
       DkimAttributes:
@@ -565,7 +619,7 @@ Resources:
     Type: AWS::SES::Template
     Properties:
       Template:
-        TemplateName: UnsubscribeTemplate
+        TemplateName: !Sub "${AWS::StackName}-unsubscribe-template"
         SubjectPart: "Unsubscribed from AI Paper Newsletter"
         HtmlPart: |
           <!DOCTYPE html>
@@ -602,7 +656,7 @@ Resources:
     Type: AWS::SES::Template
     Properties:
       Template:
-        TemplateName: VerificationTemplate
+        TemplateName: !Sub "${AWS::StackName}-verification-template"
         SubjectPart: "Verify your AI Papers Newsletter subscription"
         HtmlPart: |
           <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
@@ -700,7 +754,7 @@ Resources:
     Type: AWS::SES::Template
     Properties:
       Template:
-        TemplateName: WelcomeTemplate
+        TemplateName: !Sub "${AWS::StackName}-welcome-template"
         SubjectPart: "Welcome to AI Papers Newsletter"
         HtmlPart: |
           <!DOCTYPE html>
@@ -746,6 +800,8 @@ Resources:
 
   LogGroup:
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}"
       RetentionInDays: 30

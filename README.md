@@ -25,6 +25,7 @@ Below is an example of the newsletter final output:
 ## Architecture
 
 The system consists of several key components:
+
 - Paper Analyzer: Evaluates papers using OpenAI
 - Newsletter Generator: Creates formatted newsletters
 - Email Management: Handles subscriptions and delivery
@@ -59,8 +60,11 @@ The system consists of several key components:
 The Lambda reads the secret from Secrets Manager at runtime. For local testing, either keep `OPENAI_PAPER_NEWSLETTER_KEY` exported or set `OPENAI_SECRET_NAME=openai/paper_newsletter_key`.
 
 3. **Configure Deployment**
+
    - Copy samconfig.example.toml to samconfig.toml
-   - Update with your values
+   - Keep `TrackingDomainName` empty unless the SES tracking domain DNS and proxy/CDN are already configured.
+   - Update the remaining values for your account.
+
    ```bash
    cp samconfig.example.toml samconfig.toml
    # Edit samconfig.toml with your values
@@ -106,7 +110,10 @@ The system exposes several REST endpoints:
 
 - POST /subscribe: Subscribe new email
 - GET /verify: Verify subscription
-- GET /unsubscribe: Remove subscription
+- GET /unsubscribe: Show a confirmation page
+- POST /unsubscribe: Confirm removal using the subscriber-specific token
+- GET /metrics: Subscriber metrics, protected by AWS IAM authorization
+- POST /bulk-verify: Send verification reminders, protected by AWS IAM authorization
 
 ## Monitoring
 
@@ -144,6 +151,14 @@ Review the security checklist before deployment:
 
 ## Testing
 
-The `EmailTestMode` and `EmailTestAddress` parameters in the SamConfig enable testing. If the email test mode is sent to true, all emails will go to the email in the `EmailTestAddress` parameter. This enables making changes to the service without emailing the full subscriber base.
+The `EmailTestMode` and `EmailTestAddress` parameters in the SAM configuration enable testing. If email test mode is set to true, newsletter delivery is limited to `EmailTestAddress`.
 
-I definitely made some updates manually in the console, and had some resources already in my account so everything might not be perfectly smooth, particilarly with DNS/SES
+Run the local regression tests and infrastructure validation before deployment:
+
+```bash
+python -m unittest discover -s tests -v
+python test_improvements.py
+sam validate --lint --template-file template.yaml
+```
+
+Some AWS account setup remains outside this template, particularly SES production access and DNS for domain identity or custom click tracking.

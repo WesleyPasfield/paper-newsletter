@@ -1,15 +1,194 @@
-import boto3
-from botocore.exceptions import ClientError
+import html
 import json
-import os
-from typing import Dict, List
 import logging
-from datetime import datetime, timedelta, timezone
-import secrets
+import os
 import re
+import secrets
 import time
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import boto3
+from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
+
+VERIFICATION_TOKEN_TTL = timedelta(days=7)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def build_api_url(api_url: str, path: str, params: Optional[dict] = None) -> str:
+    """Build a validated API URL with encoded query parameters."""
+    base_url = api_url.rstrip('/')
+    parsed = urlparse(base_url)
+    if parsed.scheme != 'https' or not parsed.netloc or parsed.netloc.startswith('.'):
+        raise ValueError(f"Invalid API URL configured: {api_url}")
+
+    url = f"{base_url}/{path.lstrip('/')}" if path else base_url
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    return url
+
+
+def build_verification_url(api_url: str, email: str, token: str) -> str:
+    return build_api_url(api_url, '/verify', {'email': email, 'token': token})
+
+
+def token_is_expired(subscriber: dict, now: Optional[datetime] = None) -> bool:
+    """Check explicit expiry, falling back to the verification request timestamp."""
+    now = now or utc_now()
+    expiry_value = subscriber.get('verification_expires_at')
+
+    if expiry_value:
+        try:
+            expiry = datetime.fromisoformat(expiry_value.replace('Z', '+00:00'))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            return now >= expiry
+        except (TypeError, ValueError):
+            logger.warning("Subscriber has an invalid verification expiry timestamp")
+            return True
+
+    requested_value = subscriber.get('verification_requested_at') or subscriber.get('created_at')
+    if not requested_value:
+        return False
+
+    try:
+        requested = datetime.fromisoformat(requested_value.replace('Z', '+00:00'))
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=timezone.utc)
+        return now >= requested + VERIFICATION_TOKEN_TTL
+    except (TypeError, ValueError):
+        logger.warning("Subscriber has an invalid verification request timestamp")
+        return True
+
+
+def ensure_active_verification_token(table, subscriber: dict) -> str:
+    """Reuse a valid token or atomically replace a missing or expired token."""
+    verification_token = subscriber.get('verification_token')
+    if verification_token and not token_is_expired(subscriber):
+        return verification_token
+
+    verification_token = secrets.token_urlsafe(32)
+    now = utc_now()
+    table.update_item(
+        Key={'email': subscriber['email']},
+        UpdateExpression='SET verification_token = :token, verification_requested_at = :now, '
+                         'verification_expires_at = :expires_at',
+        ConditionExpression='#status = :pending',
+        ExpressionAttributeNames={'#status': 'status'},
+        ExpressionAttributeValues={
+            ':token': verification_token,
+            ':now': now.isoformat(),
+            ':expires_at': (now + VERIFICATION_TOKEN_TTL).isoformat(),
+            ':pending': 'pending',
+        },
+    )
+    return verification_token
+
+
+def select_bulk_verification_subscribers(subscribers: List[dict], expired_only: bool) -> List[dict]:
+    """Select all candidates or only records that still need token rotation."""
+    if not expired_only:
+        return subscribers
+    return [
+        subscriber
+        for subscriber in subscribers
+        if not subscriber.get('verification_token') or token_is_expired(subscriber)
+    ]
+
+
+def query_subscribers_by_status(table, status: str) -> List[dict]:
+    """Read every subscriber for a status using the table's status index."""
+    items = []
+    query_args = {
+        'IndexName': 'StatusIndex',
+        'KeyConditionExpression': Key('status').eq(status),
+    }
+
+    while True:
+        response = table.query(**query_args)
+        items.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            return items
+        query_args['ExclusiveStartKey'] = last_key
+
+
+def parse_request_body(event: dict) -> dict:
+    body = event.get('body') or ''
+    content_type = (event.get('headers') or {}).get('content-type', '')
+    if not content_type:
+        content_type = (event.get('headers') or {}).get('Content-Type', '')
+
+    if 'application/json' in content_type:
+        return json.loads(body)
+    return {key: values[0] for key, values in parse_qs(body).items() if values}
+
+
+def html_page(title: str, heading: str, message: str, extra_html: str = '') -> dict:
+    return {
+        'statusCode': 200,
+        'headers': {
+            'Content-Type': 'text/html',
+            'Access-Control-Allow-Origin': '*',
+        },
+        'body': f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{html.escape(title)}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }}
+        .message {{ color: #666; margin-bottom: 20px; }}
+        button {{ padding: 12px 24px; border: 0; border-radius: 4px; background: #007bff; color: white; cursor: pointer; }}
+    </style>
+</head>
+<body>
+    <h1>{html.escape(heading)}</h1>
+    <p class="message">{html.escape(message)}</p>
+    {extra_html}
+</body>
+</html>''',
+    }
+
+
+def safe_http_url(value: str) -> str:
+    """Return a safe absolute web URL or an empty string."""
+    parsed = urlparse(str(value).strip())
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        return ''
+    return parsed.geturl()
+
+
+def build_html_newsletter_data(json_content: Dict) -> dict:
+    """Create escaped values used only by the newsletter HTML template."""
+    def escaped_papers(papers: List[dict]) -> List[dict]:
+        return [
+            {
+                'title': html.escape(str(paper.get('title', ''))),
+                'summary': html.escape(str(paper.get('summary', ''))),
+                'link': html.escape(safe_http_url(paper.get('link', '')), quote=True),
+            }
+            for paper in papers
+        ]
+
+    return {
+        'overview_html': html.escape(str(json_content.get('overview', ''))),
+        'featured_papers_html': escaped_papers(json_content.get('featured_papers', [])),
+        'additional_papers_html': escaped_papers(json_content.get('additional_papers', [])),
+    }
+
 
 def is_valid_email(email: str) -> bool:
     """Validate email format"""
@@ -62,7 +241,7 @@ def add_subscriber(event, context):
         if event.get('body'):
             try:
                 body = json.loads(event['body'])
-                email = body.get('email')
+                email = normalize_email(body.get('email', ''))
                 if not email:
                     return {
                         'statusCode': 400,
@@ -93,7 +272,10 @@ def add_subscriber(event, context):
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
         
         verification_token = secrets.token_urlsafe(32)
-        timestamp = datetime.now().isoformat()
+        unsubscribe_token = secrets.token_urlsafe(32)
+        now = utc_now()
+        timestamp = now.isoformat()
+        verification_expires_at = (now + VERIFICATION_TOKEN_TTL).isoformat()
 
         try:
             response = table.get_item(Key={'email': email})
@@ -109,15 +291,20 @@ def add_subscriber(event, context):
                 # Update existing record
                 table.update_item(
                     Key={'email': email},
-                    UpdateExpression='SET #status = :status, verification_token = :token, updated_at = :timestamp, ' 
-                                    'subscription_history = list_append(if_not_exists(subscription_history, :empty_list), :history)',
+                    UpdateExpression='SET #status = :status, verification_token = :token, '
+                                    'unsubscribe_token = :unsubscribe_token, updated_at = :timestamp, '
+                                    'verification_requested_at = :timestamp, verification_expires_at = :expires_at, '
+                                    'subscription_history = list_append(if_not_exists(subscription_history, :empty_list), :history) '
+                                    'REMOVE reminder_sent, reminder_token',
                     ExpressionAttributeNames={
                         '#status': 'status'
                     },
                     ExpressionAttributeValues={
                         ':status': 'pending',
                         ':token': verification_token,
+                        ':unsubscribe_token': unsubscribe_token,
                         ':timestamp': timestamp,
+                        ':expires_at': verification_expires_at,
                         ':history': [{
                             'status': 'pending',
                             'timestamp': timestamp,
@@ -134,8 +321,11 @@ def add_subscriber(event, context):
                         'email': email,
                         'status': 'pending',
                         'verification_token': verification_token,
+                        'unsubscribe_token': unsubscribe_token,
                         'created_at': timestamp,
                         'updated_at': timestamp,
+                        'verification_requested_at': timestamp,
+                        'verification_expires_at': verification_expires_at,
                         'subscription_history': [{
                             'status': 'pending',
                             'timestamp': timestamp,
@@ -158,13 +348,20 @@ def add_subscriber(event, context):
             sender=os.environ['SENDER_EMAIL'],
             api_url=api_url
         ):
-            # If email fails, delete the subscriber record
+            # Preserve the pending record so the scheduled reminder can retry delivery.
             try:
-                table.delete_item(Key={'email': email})
-            except ClientError:
-                pass
+                table.update_item(
+                    Key={'email': email},
+                    UpdateExpression='SET verification_delivery_status = :status, updated_at = :timestamp',
+                    ExpressionAttributeValues={
+                        ':status': 'failed',
+                        ':timestamp': utc_now().isoformat(),
+                    },
+                )
+            except ClientError as update_error:
+                logger.error(f"Could not record verification delivery failure: {update_error}")
             return {
-                'statusCode': 500,
+                'statusCode': 502,
                 'headers': cors_headers,
                 'body': json.dumps({'error': 'Failed to send verification email'})
             }
@@ -206,9 +403,9 @@ def send_verification_email(email: str, verification_token: str, sender: str, ap
         logger.error("No API URL provided for verification link")
         return False
     
-    verification_url = f"{api_url}/verify?email={email}&token={verification_token}"
-    
     try:
+        verification_url = build_verification_url(api_url, email, verification_token)
+
         # Get configuration set name for better deliverability
         config_set_name = os.environ.get('EMAIL_CONFIGURATION_SET')
         
@@ -217,7 +414,7 @@ def send_verification_email(email: str, verification_token: str, sender: str, ap
             'Destination': {
                 'ToAddresses': [email]
             },
-            'Template': 'VerificationTemplate',
+            'Template': os.environ.get('VERIFICATION_TEMPLATE_NAME', 'VerificationTemplate'),
             'TemplateData': json.dumps({
                 'verification_url': verification_url,
                 'email': email
@@ -228,7 +425,7 @@ def send_verification_email(email: str, verification_token: str, sender: str, ap
         if config_set_name:
             send_params['ConfigurationSetName'] = config_set_name
         
-        response = ses_client.send_templated_email(**send_params)
+        ses_client.send_templated_email(**send_params)
         logger.info(f"Verification email sent to {email}")
         return True
     except Exception as e:
@@ -237,7 +434,6 @@ def send_verification_email(email: str, verification_token: str, sender: str, ap
     
 def verify_subscriber(event, context) -> dict:
     """Handle email verification requests"""
-    # Use same CORS headers as working add_subscriber function
     cors_headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
@@ -245,7 +441,6 @@ def verify_subscriber(event, context) -> dict:
         'Content-Type': 'application/json'
     }
     
-    # Handle OPTIONS preflight request
     if event.get('httpMethod') == 'OPTIONS':
         return {
             'statusCode': 200,
@@ -254,8 +449,7 @@ def verify_subscriber(event, context) -> dict:
         }
 
     try:
-        # Extract parameters
-        params = event.get('queryStringParameters', {})
+        params = event.get('queryStringParameters') or {}
         if not params:
             return {
                 'statusCode': 400,
@@ -263,7 +457,8 @@ def verify_subscriber(event, context) -> dict:
                 'body': json.dumps({'error': 'Missing query parameters'})
             }
             
-        email = params.get('email')
+        requested_email = (params.get('email') or '').strip()
+        email = normalize_email(requested_email)
         token = params.get('token')
         
         if not email or not token:
@@ -276,11 +471,12 @@ def verify_subscriber(event, context) -> dict:
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
         
-        # Get subscriber
         try:
-            response = table.get_item(
-                Key={'email': email}
-            )
+            response = table.get_item(Key={'email': email})
+
+            # Preserve compatibility with records created before email normalization.
+            if 'Item' not in response and requested_email != email:
+                response = table.get_item(Key={'email': requested_email})
             
             if 'Item' not in response:
                 return {
@@ -290,97 +486,105 @@ def verify_subscriber(event, context) -> dict:
                 }
                 
             subscriber = response['Item']
+            subscriber_email = subscriber['email']
+            stored_token = subscriber.get('verification_token')
             
-            # Verify token
-            if subscriber['verification_token'] != token:
+            if not stored_token or not secrets.compare_digest(str(stored_token), str(token)):
                 return {
                     'statusCode': 400,
                     'headers': cors_headers,
                     'body': json.dumps({'error': 'Invalid verification token'})
                 }
             
-            # Check if already verified
             if subscriber.get('status') == 'verified':
+                return html_page(
+                    'Already Verified',
+                    'Email Already Verified',
+                    'Your email subscription has already been verified.',
+                )
+
+            if subscriber.get('status') != 'pending':
                 return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'text/html',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': '''
-                        <!DOCTYPE html>
-                        <html>
-                        <head>
-                            <title>Already Verified</title>
-                            <style>
-                                body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
-                                .message { color: #666; margin-bottom: 20px; }
-                            </style>
-                        </head>
-                        <body>
-                            <h1>Email Already Verified</h1>
-                            <p class="message">Your email subscription has already been verified.</p>
-                            <p>You should be receiving our newsletters. Check your spam folder if you haven't seen them.</p>
-                        </body>
-                        </html>
-                    '''
+                    'statusCode': 409,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Subscription is not pending verification'}),
                 }
-                
-            # Update status to verified
+
+            if token_is_expired(subscriber):
+                return {
+                    'statusCode': 410,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Verification token has expired. Please subscribe again.'}),
+                }
+
+            verified_at = utc_now().isoformat()
             table.update_item(
-                Key={'email': email},
-                UpdateExpression='SET #status = :status, verified_at = :verified_at',
+                Key={'email': subscriber_email},
+                UpdateExpression='SET #status = :verified, verified_at = :verified_at, updated_at = :verified_at, '
+                                 'subscription_history = list_append(if_not_exists(subscription_history, :empty_list), :history)',
+                ConditionExpression='#status = :pending AND verification_token = :token',
                 ExpressionAttributeNames={
                     '#status': 'status'
                 },
                 ExpressionAttributeValues={
-                    ':status': 'verified',
-                    ':verified_at': datetime.now().isoformat()
+                    ':verified': 'verified',
+                    ':pending': 'pending',
+                    ':token': token,
+                    ':verified_at': verified_at,
+                    ':empty_list': [],
+                    ':history': [{
+                        'status': 'verified',
+                        'timestamp': verified_at,
+                        'action': 'verify',
+                    }],
                 }
             )
             
-            # Return success with HTML
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'text/html',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': '''
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                        <title>Subscription Verified</title>
-                        <style>
-                            body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
-                            .success { color: #28a745; font-size: 24px; margin-bottom: 20px; }
-                            .message { color: #666; margin-bottom: 20px; }
-                        </style>
-                    </head>
-                    <body>
-                        <h1 class="success">Subscription Verified!</h1>
-                        <p class="message">Thank you for subscribing to the AI Papers Newsletter.</p>
-                        <p>You'll start receiving newsletters in your inbox soon.</p>
-                    </body>
-                    </html>
-                '''
-            }
+            return html_page(
+                'Subscription Verified',
+                'Subscription Verified!',
+                "Thank you for subscribing. You'll start receiving newsletters soon.",
+            )
             
         except ClientError as e:
-            logger.error(f"DynamoDB error: {str(e)}")
-            return {
-                'statusCode': 500,
-                'headers': cors_headers,
-                'body': json.dumps({'error': 'Database error'})
-            }
+            if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                return {
+                    'statusCode': 409,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Subscription state changed. Please request a new link.'}),
+                }
+            logger.error(f"DynamoDB error: {e}")
+            raise
             
     except Exception as e:
-        logger.error(f"Error verifying subscriber: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': cors_headers,
-            'body': json.dumps({'error': 'Internal server error'})
-        }
+        logger.error(f"Error verifying subscriber: {e}")
+        raise
+
+def publish_verification_metrics(success_count: int, failure_count: int, batch_size: int) -> None:
+    """Publish the custom metrics referenced by the verification dashboard."""
+    try:
+        cloudwatch = boto3.client('cloudwatch')
+        cloudwatch.put_metric_data(
+            Namespace='Newsletter/Verification',
+            MetricData=[
+                {'MetricName': 'ReminderEmailSuccess', 'Value': success_count, 'Unit': 'Count'},
+                {'MetricName': 'ReminderEmailFailure', 'Value': failure_count, 'Unit': 'Count'},
+                {'MetricName': 'ReminderBatchSize', 'Value': batch_size, 'Unit': 'Count'},
+            ],
+        )
+    except Exception as metric_error:
+        logger.error(f"Could not publish verification metrics: {metric_error}")
+
+
+def publish_verification_system_error() -> None:
+    try:
+        boto3.client('cloudwatch').put_metric_data(
+            Namespace='Newsletter/Verification',
+            MetricData=[{'MetricName': 'ReminderSystemError', 'Value': 1, 'Unit': 'Count'}],
+        )
+    except Exception as metric_error:
+        logger.error(f"Could not publish verification system error metric: {metric_error}")
+
 
 def check_and_resend_verifications(event, context):
     """
@@ -392,52 +596,62 @@ def check_and_resend_verifications(event, context):
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
         
-        # Calculate cutoff time (48 hours ago)
-        cutoff_time = (datetime.now() - timedelta(hours=48)).isoformat()
+        cutoff_time = utc_now() - timedelta(hours=48)
+        pending_subscribers = query_subscribers_by_status(table, 'pending')
+        subscribers_to_remind = []
+        for subscriber in pending_subscribers:
+            if subscriber.get('reminder_sent'):
+                continue
+
+            requested_at = subscriber.get('verification_requested_at') or subscriber.get('created_at')
+            if not requested_at:
+                continue
+
+            try:
+                requested_time = datetime.fromisoformat(requested_at.replace('Z', '+00:00'))
+                if requested_time.tzinfo is None:
+                    requested_time = requested_time.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                logger.warning(f"Skipping subscriber with invalid verification timestamp: {subscriber.get('email', 'unknown')}")
+                continue
+
+            if requested_time < cutoff_time:
+                subscribers_to_remind.append(subscriber)
         
-        # Query for subscribers who need reminders
-        response = table.scan(
-            FilterExpression='#status = :status AND created_at < :cutoff AND attribute_not_exists(reminder_sent)',
-            ExpressionAttributeNames={
-                '#status': 'status'
-            },
-            ExpressionAttributeValues={
-                ':status': 'pending',
-                ':cutoff': cutoff_time
-            }
-        )
-        
-        api_url = os.environ['API_URL']
+        api_url = (event or {}).get('api_url') or os.environ.get('API_URL')
+        if not api_url:
+            raise ValueError('No API URL was provided to the verification reminder')
         sender_email = os.environ['SENDER_EMAIL']
+        build_api_url(api_url, '')
         
         success_count = 0
         failure_count = 0
         
-        for item in response.get('Items', []):
+        for item in subscribers_to_remind:
+            email = item.get('email', 'unknown')
             try:
                 email = item['email']
-                # Generate new verification token for security
-                verification_token = secrets.token_urlsafe(32)
-                
+                verification_token = ensure_active_verification_token(table, item)
+
                 logger.info(f"Processing reminder for {email}")
-                
-                # Update token before sending email
-                table.update_item(
-                    Key={'email': email},
-                    UpdateExpression='SET verification_token = :token, reminder_sent = :now, reminder_token = :token',
-                    ExpressionAttributeValues={
-                        ':token': verification_token,
-                        ':now': datetime.now().isoformat()
-                    }
-                )
-                
-                # Send verification reminder
+
                 if send_verification_email(
                     email=email,
                     verification_token=verification_token,
                     sender=sender_email,
                     api_url=api_url
                 ):
+                    table.update_item(
+                        Key={'email': email},
+                        UpdateExpression='SET reminder_sent = :now',
+                        ConditionExpression='#status = :pending AND verification_token = :token',
+                        ExpressionAttributeNames={'#status': 'status'},
+                        ExpressionAttributeValues={
+                            ':now': utc_now().isoformat(),
+                            ':pending': 'pending',
+                            ':token': verification_token,
+                        },
+                    )
                     success_count += 1
                     logger.info(f"Successfully sent verification reminder to {email}")
                 else:
@@ -448,6 +662,8 @@ def check_and_resend_verifications(event, context):
                 failure_count += 1
                 logger.error(f"Error processing subscriber {email}: {str(e)}")
         
+        batch_size = len(subscribers_to_remind)
+        publish_verification_metrics(success_count, failure_count, batch_size)
         logger.info(f"Reminder process completed. Successes: {success_count}, Failures: {failure_count}")
         
         return {
@@ -456,27 +672,21 @@ def check_and_resend_verifications(event, context):
                 'message': 'Verification reminder process completed',
                 'success_count': success_count,
                 'failure_count': failure_count,
-                'batch_size': len(response.get('Items', []))
+                'batch_size': batch_size
             })
         }
         
     except Exception as e:
-        logger.error(f"Error in check_and_resend_verifications: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'error': 'Internal server error',
-                'message': str(e)
-            })
-        }
+        logger.error(f"Error in check_and_resend_verifications: {e}")
+        publish_verification_system_error()
+        raise
 
 def unsubscribe_handler(event, context) -> dict:
-    """Handle unsubscribe requests"""
-    # Use same CORS headers as working add_subscriber function
+    """Show an unsubscribe confirmation on GET and apply it on POST."""
     cors_headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,OPTIONS',
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
         'Content-Type': 'application/json'
     }
     
@@ -489,32 +699,33 @@ def unsubscribe_handler(event, context) -> dict:
         }
 
     try:
-        # Extract parameters
-        params = event.get('queryStringParameters', {})
-        if not params:
+        method = event.get('httpMethod', 'GET').upper()
+        try:
+            params = parse_request_body(event) if method == 'POST' else (event.get('queryStringParameters') or {})
+        except json.JSONDecodeError:
             return {
                 'statusCode': 400,
                 'headers': cors_headers,
-                'body': json.dumps({'error': 'Missing query parameters'})
+                'body': json.dumps({'error': 'Invalid request body'}),
             }
-            
-        email = params.get('email')
-        
-        if not email:
+
+        requested_email = (params.get('email') or '').strip()
+        email = normalize_email(requested_email)
+        token = params.get('token')
+        if not email or not token:
             return {
                 'statusCode': 400,
                 'headers': cors_headers,
-                'body': json.dumps({'error': 'Missing email parameter'})
+                'body': json.dumps({'error': 'Missing email or unsubscribe token'}),
             }
-        
+
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
-        
-        # Get subscriber
+
         try:
-            response = table.get_item(
-                Key={'email': email}
-            )
+            response = table.get_item(Key={'email': email})
+            if 'Item' not in response and requested_email != email:
+                response = table.get_item(Key={'email': requested_email})
             
             if 'Item' not in response:
                 return {
@@ -524,76 +735,87 @@ def unsubscribe_handler(event, context) -> dict:
                 }
                 
             subscriber = response['Item']
-            
-            # Check if already unsubscribed
-            if subscriber.get('status') == 'unsubscribed':
+            subscriber_email = subscriber['email']
+            stored_token = subscriber.get('unsubscribe_token')
+            if not stored_token or not secrets.compare_digest(str(stored_token), str(token)):
                 return {
-                    'statusCode': 200,
-                    'headers': {
-                        'Content-Type': 'text/html',
-                        'Access-Control-Allow-Origin': '*'
-                    },
-                    'body': '''
-                        <!DOCTYPE html>
-                        <html>
-                        <head>
-                            <title>Already Unsubscribed</title>
-                            <style>
-                                body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
-                                .message { color: #666; margin-bottom: 20px; }
-                            </style>
-                        </head>
-                        <body>
-                            <h1>Email Already Unsubscribed</h1>
-                            <p class="message">Your email has already been unsubscribed from our newsletter.</p>
-                            <p>If you'd like to subscribe again, you can do so on our website.</p>
-                        </body>
-                        </html>
-                    '''
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Invalid unsubscribe token'}),
                 }
-                
-            # Update status to unsubscribed
+
+            if subscriber.get('status') == 'unsubscribed':
+                return html_page(
+                    'Already Unsubscribed',
+                    'Email Already Unsubscribed',
+                    'This email has already been unsubscribed from the newsletter.',
+                )
+
+            if method == 'GET':
+                api_url = get_api_url_from_event(event)
+                if not api_url:
+                    return {
+                        'statusCode': 500,
+                        'headers': cors_headers,
+                        'body': json.dumps({'error': 'Could not determine API URL'}),
+                    }
+
+                action_url = html.escape(build_api_url(api_url, '/unsubscribe'), quote=True)
+                form = f'''<form method="post" action="{action_url}">
+    <input type="hidden" name="email" value="{html.escape(subscriber_email, quote=True)}">
+    <input type="hidden" name="token" value="{html.escape(token, quote=True)}">
+    <button type="submit">Confirm unsubscribe</button>
+</form>'''
+                return html_page(
+                    'Confirm Unsubscribe',
+                    'Confirm Unsubscribe',
+                    'Confirm that you want to stop receiving the AI Papers Newsletter.',
+                    form,
+                )
+
+            if subscriber.get('status') != 'verified':
+                return {
+                    'statusCode': 409,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Only verified subscriptions can be unsubscribed'}),
+                }
+
+            unsubscribed_at = utc_now().isoformat()
             table.update_item(
-                Key={'email': email},
-                UpdateExpression='SET #status = :status, unsubscribed_at = :unsubscribed_at',
+                Key={'email': subscriber_email},
+                UpdateExpression='SET #status = :unsubscribed, unsubscribed_at = :unsubscribed_at, updated_at = :unsubscribed_at, '
+                                 'subscription_history = list_append(if_not_exists(subscription_history, :empty_list), :history)',
+                ConditionExpression='#status = :verified AND unsubscribe_token = :token',
                 ExpressionAttributeNames={
                     '#status': 'status'
                 },
                 ExpressionAttributeValues={
-                    ':status': 'unsubscribed',
-                    ':unsubscribed_at': datetime.now().isoformat()
+                    ':unsubscribed': 'unsubscribed',
+                    ':verified': 'verified',
+                    ':token': token,
+                    ':unsubscribed_at': unsubscribed_at,
+                    ':empty_list': [],
+                    ':history': [{
+                        'status': 'unsubscribed',
+                        'timestamp': unsubscribed_at,
+                        'action': 'unsubscribe',
+                    }],
                 }
             )
-            
-            # Return success with HTML
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'text/html',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': '''
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                        <title>Unsubscribed</title>
-                        <style>
-                            body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
-                            .success { color: #28a745; font-size: 24px; margin-bottom: 20px; }
-                            .message { color: #666; margin-bottom: 20px; }
-                        </style>
-                    </head>
-                    <body>
-                        <h1 class="success">Unsubscribed Successfully!</h1>
-                        <p class="message">You have been unsubscribed from the AI Papers Newsletter.</p>
-                        <p>If you change your mind, you can always subscribe again on our website.</p>
-                    </body>
-                    </html>
-                '''
-            }
+            return html_page(
+                'Unsubscribed',
+                'Unsubscribed Successfully!',
+                'You have been unsubscribed from the AI Papers Newsletter.',
+            )
             
         except ClientError as e:
-            logger.error(f"DynamoDB error: {str(e)}")
+            if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                return {
+                    'statusCode': 409,
+                    'headers': cors_headers,
+                    'body': json.dumps({'error': 'Subscription state changed. Refresh and try again.'}),
+                }
+            logger.error(f"DynamoDB error: {e}")
             return {
                 'statusCode': 500,
                 'headers': cors_headers,
@@ -608,9 +830,9 @@ def unsubscribe_handler(event, context) -> dict:
             'body': json.dumps({'error': 'Internal server error'})
         }
     
-def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: str, subscribe_url: str):
+def create_or_update_template(ses_client):
     """Create or update SES template with subscribe button"""
-    template_name = 'NewsletterTemplate'
+    template_name = os.environ.get('NEWSLETTER_TEMPLATE_NAME', 'NewsletterTemplate')
     template_data = {
         'Template': {
             'TemplateName': template_name,
@@ -754,7 +976,7 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                     <!-- Overview -->
                     <tr>
                         <td align="left" valign="top" style="padding: 20px;" class="dark-text fallback-font">
-                            {{overview}}
+                            {{{overview_html}}}
                         </td>
                     </tr>
 
@@ -762,23 +984,23 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                     <tr>
                         <td align="left" valign="top" style="padding: 0 20px;">
                             <h2 class="dark-text fallback-font">Featured Research</h2>
-                            {{#each featured_papers}}
+                            {{#each featured_papers_html}}
                             <div class="paper">
-                                <h3 class="fallback-font"><a href="{{{link}}}">{{title}}</a></h3>
-                                <p class="dark-text fallback-font">{{summary}}</p>
+                                <h3 class="fallback-font"><a href="{{{link}}}">{{{title}}}</a></h3>
+                                <p class="dark-text fallback-font">{{{summary}}}</p>
                             </div>
                             {{/each}}
                         </td>
                     </tr>
 
                     <!-- Additional Papers -->
-                    {{#if additional_papers}}
+                    {{#if additional_papers_html}}
                     <tr>
                         <td align="left" valign="top" style="padding: 0 20px;">
                             <h2 class="dark-text fallback-font">Additional Papers</h2>
-                            {{#each additional_papers}}
+                            {{#each additional_papers_html}}
                             <div class="metadata fallback-font">
-                                • <a href="{{{link}}}">{{title}}</a>
+                                • <a href="{{{link}}}">{{{title}}}</a>
                             </div>
                             {{/each}}
                         </td>
@@ -788,10 +1010,10 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                     <tr>
                         <td align="center" valign="top" class="social-section">
                             <p style="margin-bottom: 15px; color: #666666; font-size: 14px;">Share this newsletter:</p>
-                            <a href="https://twitter.com/intent/tweet?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation&url={{subscribe_url}}" target="_blank" class="social-button" style="background-color: #000000; color: #ffffff;">Share on X</a>
-                            <a href="https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation%20{{subscribe_url}}" target="_blank" class="social-button" style="background-color: #0085ff; color: #ffffff;">Share on Bluesky</a>
-                            <a href="https://www.linkedin.com/sharing/share-offsite/?url={{subscribe_url}}" target="_blank" class="social-button" style="background-color: #0077b5; color: #ffffff;">Share on LinkedIn</a>
-                            <a href="mailto:?subject=AI%20Papers%20Newsletter&body=I%20thought%20you%20might%20be%20interested%20in%20this%20AI%20research%20newsletter.%20Check%20it%20out%20at%20{{subscribe_url}}" class="social-button" style="background-color: #666666; color: #ffffff;">Share via Email</a>
+                            <a href="https://twitter.com/intent/tweet?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation&amp;url={{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #000000; color: #ffffff;">Share on X</a>
+                            <a href="https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation%20{{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #0085ff; color: #ffffff;">Share on Bluesky</a>
+                            <a href="https://www.linkedin.com/sharing/share-offsite/?url={{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #0077b5; color: #ffffff;">Share on LinkedIn</a>
+                            <a href="mailto:?subject=AI%20Papers%20Newsletter&amp;body=I%20thought%20you%20might%20be%20interested%20in%20this%20AI%20research%20newsletter.%20Check%20it%20out%20at%20{{{subscribe_url_html}}}" class="social-button" style="background-color: #666666; color: #ffffff;">Share via Email</a>
                         </td>
                     </tr>
                     {{/if}}
@@ -800,10 +1022,10 @@ def create_or_update_template(ses_client, json_content: Dict, unsubscribe_url: s
                     <tr>
                         <td align="center" valign="top" class="footer">
                             <p class="dark-text fallback-font">
-                                <a href="{{{unsubscribe_url}}}" style="color: #666666;">Unsubscribe</a>
+                                <a href="{{{unsubscribe_url_html}}}" style="color: #666666;">Unsubscribe</a>
                             </p>
                             <p class="dark-text fallback-font">
-                                Was this forwarded to you? <a href="{{{subscribe_url}}}" style="color: #666666;">Subscribe or contact here</a>
+                                Was this forwarded to you? <a href="{{{subscribe_url_html}}}" style="color: #666666;">Subscribe or contact here</a>
                             </p>
                             <p class="dark-text fallback-font">
                                 Check out the <a href="https://wesleypasfield.substack.com/" style="color: #666666;">blog</a> for more AI related content
@@ -857,48 +1079,56 @@ To unsubscribe: {{{unsubscribe_url}}}'''
         else:
             raise
 
-def get_subscribers(table_name: str) -> List[str]:
-    """Retrieve verified subscriber emails from DynamoDB"""
+def get_subscribers(table_name: str) -> List[dict]:
+    """Retrieve every verified subscriber and ensure an unsubscribe token exists."""
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table(table_name)
     
     try:
-        response = table.scan(
-            ProjectionExpression='email',
-            FilterExpression='#status = :status',
-            ExpressionAttributeNames={
-                '#status': 'status'
-            },
-            ExpressionAttributeValues={
-                ':status': 'verified'
-            }
-        )
-        return [item['email'] for item in response['Items']]
-    except ClientError as e:
-        logger.error(f"Error scanning DynamoDB table: {str(e)}")
-        raise
-# Note need to update send_email_batch to enable testing
+        subscribers = query_subscribers_by_status(table, 'verified')
+        for subscriber in subscribers:
+            if subscriber.get('unsubscribe_token'):
+                continue
 
-def test_prod_check(emails: List[str], test_email: str) -> List[str]:
+            token = secrets.token_urlsafe(32)
+            response = table.update_item(
+                Key={'email': subscriber['email']},
+                UpdateExpression='SET unsubscribe_token = if_not_exists(unsubscribe_token, :token)',
+                ExpressionAttributeValues={':token': token},
+                ReturnValues='ALL_NEW',
+            )
+            subscriber['unsubscribe_token'] = response['Attributes']['unsubscribe_token']
+        return subscribers
+    except ClientError as e:
+        logger.error(f"Error querying DynamoDB table: {e}")
+        raise
+
+def test_prod_check(subscribers: List[dict], test_email: str) -> List[dict]:
     """
     Returns appropriate recipient list based on test mode settings
     """
     test_mode = os.environ.get('EMAIL_TEST_MODE', 'false').lower() == 'true'
-    
-    if test_mode and test_email:
-        logger.info(f"Test mode enabled: Sending single test email instead of {len(emails)} subscriber emails")
-        return [test_email]
 
-    return emails
+    if test_mode:
+        if not test_email or not is_valid_email(test_email):
+            raise ValueError('EMAIL_TEST_ADDRESS must contain a valid email when test mode is enabled')
+        normalized_test_email = normalize_email(test_email)
+        logger.info(f"Test mode enabled: Sending single test email instead of {len(subscribers)} subscriber emails")
+        existing = next(
+            (subscriber for subscriber in subscribers if subscriber['email'] == normalized_test_email),
+            None,
+        )
+        return [existing or {'email': normalized_test_email, 'unsubscribe_token': 'test-mode'}]
 
-def send_email_batch(ses_client, source: str, emails: List[str], json_content: Dict, unsubscribe_url: str, subscribe_url: str) -> Dict:
+    return subscribers
+
+def send_email_batch(ses_client, source: str, subscribers: List[dict], json_content: Dict, unsubscribe_url: str, subscribe_url: str) -> Dict:
     results = {'successful': 0, 'failed': 0, 'failures': []}
 
-    # Get appropriate recipient list based on test mode
-    emails = test_prod_check(emails, os.environ.get('EMAIL_TEST_ADDRESS', ''))
+    subscribers = test_prod_check(subscribers, os.environ.get('EMAIL_TEST_ADDRESS', ''))
     
     default_template_data = {
-        'date': datetime.now().strftime('%B %d, %Y'),
+        'date': utc_now().strftime('%B %d, %Y'),
         'generated_date': json_content['metadata']['generated_date'],
         'featured_count': json_content['metadata']['featured_papers_count'],
         'overview': json_content['overview'],
@@ -908,21 +1138,37 @@ def send_email_batch(ses_client, source: str, emails: List[str], json_content: D
         'subscribe_url': subscribe_url,
         'email': ''
     }
+    default_template_data.update(build_html_newsletter_data(json_content))
+    default_template_data.update({
+        'unsubscribe_url_html': html.escape(unsubscribe_url, quote=True),
+        'subscribe_url_html': html.escape(subscribe_url, quote=True),
+    })
 
     batch_size = 50
-    for i in range(0, len(emails), batch_size):
-        batch_emails = emails[i:i + batch_size]
+    for i in range(0, len(subscribers), batch_size):
+        batch_subscribers = subscribers[i:i + batch_size]
         destinations = []
         
-        for email in batch_emails:
+        for subscriber in batch_subscribers:
+            email = subscriber['email']
+            unsubscribe_link = build_api_url(
+                unsubscribe_url,
+                '',
+                {
+                    'email': email,
+                    'token': subscriber['unsubscribe_token'],
+                },
+            )
             destinations.append({
                 'Destination': {
                     'ToAddresses': [email]
                 },
                 'ReplacementTemplateData': json.dumps({
                     'email': email,
-                    'unsubscribe_url': f"{unsubscribe_url}?email={email}",
-                    'subscribe_url': subscribe_url
+                    'unsubscribe_url': unsubscribe_link,
+                    'subscribe_url': subscribe_url,
+                    'unsubscribe_url_html': html.escape(unsubscribe_link, quote=True),
+                    'subscribe_url_html': html.escape(subscribe_url, quote=True),
                 }),
                 'ReplacementTags': [
                     {
@@ -939,7 +1185,7 @@ def send_email_batch(ses_client, source: str, emails: List[str], json_content: D
 
             response = ses_client.send_bulk_templated_email(
                 Source=source,
-                Template='NewsletterTemplate',
+                Template=os.environ.get('NEWSLETTER_TEMPLATE_NAME', 'NewsletterTemplate'),
                 DefaultTemplateData=json.dumps(default_template_data),
                 Destinations=destinations,
                 ConfigurationSetName=config_set_name
@@ -957,40 +1203,40 @@ def send_email_batch(ses_client, source: str, emails: List[str], json_content: D
 
         except Exception as e:
             logger.error(f"Error sending batch: {str(e)}")
-            results['failed'] += len(batch_emails)
+            results['failed'] += len(batch_subscribers)
             results['failures'].append({
-                'batch': batch_emails,
+                'batch': [subscriber['email'] for subscriber in batch_subscribers],
                 'error': str(e)
             })
             
     return results
 
-def send_newsletter(json_content: Dict, table_name: str, sender: str) -> Dict:
+def send_newsletter(json_content: Dict, table_name: str, sender: str, api_url: str) -> Dict:
     """Main function to send newsletter to all subscribers"""
     try:
         ses_client = boto3.client('ses')
 
         # Construct unsubscribe URL using AWS environment variables
-        unsubscribe_url = f"{os.environ['API_URL']}/unsubscribe"
-        subscribe_url = f"{os.environ['SUBSCRIBE_LANDING_PAGE']}"
+        unsubscribe_url = build_api_url(api_url, '/unsubscribe')
+        subscribe_url = build_api_url(os.environ['SUBSCRIBE_LANDING_PAGE'], '')
 
         logger.info(f'unsubscribe url: {unsubscribe_url}')
         logger.info(f'subscribe url: {subscribe_url}')
         
         # Get subscribers
-        subscriber_emails = get_subscribers(table_name)
-        if not subscriber_emails:
+        subscribers = get_subscribers(table_name)
+        if not subscribers:
             logger.warning("No subscribers found")
             return {'message': 'No subscribers found'}
             
         # Create/update SES template with the new format
-        create_or_update_template(ses_client, json_content, unsubscribe_url, subscribe_url)  
+        create_or_update_template(ses_client)
         
         # Send emails using the template
         results = send_email_batch(
             ses_client=ses_client,
             source=sender,
-            emails=subscriber_emails,
+            subscribers=subscribers,
             json_content=json_content,
             unsubscribe_url=unsubscribe_url,
             subscribe_url= subscribe_url
@@ -1004,46 +1250,37 @@ def send_newsletter(json_content: Dict, table_name: str, sender: str) -> Dict:
         raise
 
 def get_subscriber_counts(table_name: str) -> dict:
-    """
-    Query DynamoDB to get counts of subscribers by status using direct scan approach
-    """
+    """Query complete subscriber counts, including paginated results."""
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table(table_name)
     
     try:
-        # Get verified subscribers
-        verified = table.scan(
-            FilterExpression='#status = :verified',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':verified': 'verified'},
-        )
-        
-        # Get pending subscribers
-        pending = table.scan(
-            FilterExpression='#status = :verified',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':verified': 'pending'},
-        )
-        
-        # Get unsubscribed users
-        unsubscribed = table.scan(
-            FilterExpression='#status = :unsubscribed',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':unsubscribed': 'unsubscribed'},
-        )
-        
-        # Get all records for total count
-        all_records = table.scan()
+        def count_status(status: str) -> int:
+            count = 0
+            query_args = {
+                'IndexName': 'StatusIndex',
+                'KeyConditionExpression': Key('status').eq(status),
+                'Select': 'COUNT',
+            }
+            while True:
+                response = table.query(**query_args)
+                count += response.get('Count', 0)
+                last_key = response.get('LastEvaluatedKey')
+                if not last_key:
+                    return count
+                query_args['ExclusiveStartKey'] = last_key
+
+        status_counts = {
+            'verified': count_status('verified'),
+            'pending': count_status('pending'),
+            'unsubscribed': count_status('unsubscribed'),
+        }
         
         metrics = {
-            'total_subscribers': all_records['Count'],
-            'status_counts': {
-                'verified': verified['Count'],
-                'pending': pending['Count'],
-                'unsubscribed': unsubscribed['Count']
-            },
+            'total_subscribers': sum(status_counts.values()),
+            'status_counts': status_counts,
             'metadata': {
-                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'timestamp': utc_now().isoformat(),
                 'table_name': os.environ['SUBSCRIBERS_TABLE']
             }
         }
@@ -1122,29 +1359,13 @@ def bulk_verifier(event, context):
     
     try:
         # Calculate cutoff date (30 days ago) in UTC
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff_date = utc_now() - timedelta(days=30)
         
         # Get all pending subscribers
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(os.environ['SUBSCRIBERS_TABLE'])
         
-        response = table.scan(
-            FilterExpression='#status = :pending',
-            ExpressionAttributeNames={'#status': 'status'},
-            ExpressionAttributeValues={':pending': 'pending'}
-        )
-        
-        pending_subscribers = response['Items']
-        
-        # Handle pagination if necessary
-        while 'LastEvaluatedKey' in response:
-            response = table.scan(
-                FilterExpression='#status = :pending',
-                ExpressionAttributeNames={'#status': 'status'},
-                ExpressionAttributeValues={':pending': 'pending'},
-                ExclusiveStartKey=response['LastEvaluatedKey']
-            )
-            pending_subscribers.extend(response['Items'])
+        pending_subscribers = query_subscribers_by_status(table, 'pending')
         
         # Filter to only include subscribers who subscribed within the last 30 days
         recent_subscribers = []
@@ -1190,30 +1411,52 @@ def bulk_verifier(event, context):
                     'filtered_out': filtered_count
                 })
             }
+
+        recent_subscribers = select_bulk_verification_subscribers(
+            recent_subscribers,
+            bool((event or {}).get('expired_tokens_only')),
+        )
+
+        if not recent_subscribers:
+            return {
+                'statusCode': 200,
+                'headers': headers,
+                'body': json.dumps({
+                    'message': 'No matching pending subscribers require verification emails',
+                    'sent_count': 0,
+                    'total_pending': len(pending_subscribers),
+                    'recent_subscribers': 0,
+                    'filtered_out_older_than_30_days': filtered_count,
+                    'failures': [],
+                }, indent=2),
+            }
         
         # Send emails
-        ses_client = boto3.client('ses')
+        api_url = get_api_url_from_event(event) or os.environ.get('API_URL')
+        if not api_url:
+            raise ValueError('Could not determine the API URL for verification links')
+        build_api_url(api_url, '')
         sent_count = 0
         failures = []
+        send_rate = max(1.0, float(os.environ.get('BULK_VERIFICATION_SEND_RATE', '10')))
+        send_interval = 1 / send_rate
         
         for subscriber in recent_subscribers:
             try:
-                verification_url = f"{os.environ['API_URL']}/verify?email={subscriber['email']}&token={subscriber['verification_token']}"
-                
-                response = ses_client.send_templated_email(
-                    Source=os.environ['SENDER_EMAIL'],
-                    Destination={
-                        'ToAddresses': [subscriber['email']]
-                    },
-                    Template='VerificationTemplate',
-                    TemplateData=json.dumps({
-                        'verification_url': verification_url,
-                        'email': subscriber['email']
-                    }),
-                    ConfigurationSetName=os.environ['EMAIL_CONFIGURATION_SET']
-                )
-                sent_count += 1
-                logger.info(f"Sent reminder to {subscriber['email']}")
+                verification_token = ensure_active_verification_token(table, subscriber)
+                if send_verification_email(
+                    email=subscriber['email'],
+                    verification_token=verification_token,
+                    sender=os.environ['SENDER_EMAIL'],
+                    api_url=api_url,
+                ):
+                    sent_count += 1
+                    logger.info(f"Sent reminder to {subscriber['email']}")
+                else:
+                    failures.append({
+                        'email': subscriber['email'],
+                        'error': 'SES rejected the verification email',
+                    })
                 
             except Exception as e:
                 failures.append({
@@ -1221,6 +1464,8 @@ def bulk_verifier(event, context):
                     'error': str(e)
                 })
                 logger.error(f"Failed to send reminder to {subscriber['email']}: {str(e)}")
+            finally:
+                time.sleep(send_interval)
         
         return {
             'statusCode': 200,

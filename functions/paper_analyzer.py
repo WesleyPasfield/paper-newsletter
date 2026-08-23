@@ -3,13 +3,12 @@ import feedparser
 import requests
 import time
 import random
-import math
 from openai import APIError, OpenAI
 import json
 from datetime import datetime
 import logging
 from bs4 import BeautifulSoup
-from typing import Set, Dict, Optional
+from typing import Set, Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -151,7 +150,7 @@ class Paper:
     def __eq__(self, other):
         if not isinstance(other, Paper):
             return False
-        return self.title == other.title or self.link == other.link
+        return self.title == other.title and self.link == other.link
 
 class PaperAnalyzer:
     def __init__(
@@ -698,7 +697,7 @@ Additional Papers. These should not receive a summary in the JSON response:
             html_url = f"https://arxiv.org/html/{arxiv_id}"
 
             logger.info(f"Fetching HTML content from {html_url}")
-            response = requests.get(html_url)
+            response = requests.get(html_url, timeout=30)
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -859,7 +858,10 @@ Additional Papers. These should not receive a summary in the JSON response:
                 continue
             
             # Check if paper was already processed in this run
-            if paper in self.processed_papers:
+            if any(
+                processed.title == paper.title or processed.link == paper.link
+                for processed in self.processed_papers
+            ):
                 logger.info(f'Skipping duplicate paper within current run: {paper.title}')
                 logger.info(f'  Processed papers count: {len(self.processed_papers)}')
                 continue
@@ -917,7 +919,9 @@ Additional Papers. These should not receive a summary in the JSON response:
             remaining_slots = MAX_TOTAL_PAPERS - (len(all_interesting_papers) + len(all_papers_without_content))
             if remaining_slots > 0:
                 all_interesting_papers.extend(interesting_papers[:remaining_slots])
-                remaining_slots = MAX_TOTAL_PAPERS - len(all_interesting_papers)
+                remaining_slots = MAX_TOTAL_PAPERS - (
+                    len(all_interesting_papers) + len(all_papers_without_content)
+                )
                 if remaining_slots > 0:
                     all_papers_without_content.extend(papers_without_content[:remaining_slots])
             
@@ -956,7 +960,7 @@ Additional Papers. These should not receive a summary in the JSON response:
                         logger.info(f'Reached maximum paper limit of {MAX_TOTAL_PAPERS}. Stopping threshold adjustment.')
                         break
 
-                    papers_review, papers_no_content, ignore_this = self.process_single_feed(
+                    papers_review, papers_no_content, _ = self.process_single_feed(
                         feed_url, title_threshold, abstract_threshold
                     )
                     
@@ -1003,9 +1007,9 @@ Additional Papers. These should not receive a summary in the JSON response:
         if total_final == 0:
             logger.error("No papers found after all processing attempts. This could be due to:")
             logger.error(f"  1. All papers were duplicates (previously included: {len(self.previously_included_papers)})")
-            logger.error(f"  2. All papers scored below thresholds even after adjustment")
-            logger.error(f"  3. API failures preventing evaluation")
-            logger.error(f"  4. Content fetch failures for all papers")
+            logger.error("  2. All papers scored below thresholds even after adjustment")
+            logger.error("  3. API failures preventing evaluation")
+            logger.error("  4. Content fetch failures for all papers")
         else:
             logger.info(f"Proceeding to create newsletter with {len(all_interesting_papers)} featured and {len(all_papers_without_content)} additional papers")
         
