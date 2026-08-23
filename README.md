@@ -89,12 +89,15 @@ Example evaluation criteria:
 ```python
 EVAL_PROMPT = """
 You are evaluating academic papers for an expert specializing in:
-1. Practical LLM/Generative AI regulation
-2. Societal and economic impacts
-3. Technical implementation
+1. Agent evaluation, optimization, and loop engineering
+2. Agent architecture, tools, memory, and orchestration
+3. Production reliability and LLMOps
+4. Safety, governance, and evaluation policy
 ...
 """
 ```
+
+The default model routing uses `gpt-5.6-luna` for title evaluation, abstract evaluation, and newsletter generation. It falls back to `gpt-5.6-sol`, then `gpt-5.5` if rate-limit handling escalates.
 
 ### Email Templates
 

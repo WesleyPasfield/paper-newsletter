@@ -15,83 +15,51 @@ logger.setLevel(logging.INFO)
 
 EVAL_PROMPT = """
 ### Role
-You are evaluating academic papers for a researcher specializing in the transition from "Experimental AI" to "Reliable AI Systems."
+Evaluate academic papers for Wesley Pasfield's AI research newsletter. The editorial focus is the engineering work required to move agentic AI from experiments into reliable production systems.
 
-### 1. Reliable AI Systems:
-- **Agent Improvement Loops:** Papers where humans, traces, evals, field failures, or model critiques update goals, rubrics, prompts, tools, policies, or implementation plans.
-- **Runtime Feedback Signals:** Human feedback used during operation, especially when it changes the agent's objective, policy, evaluation criteria, or next implementation step.
-- **System Reliability Under Use:** Methods that turn production failures, customer failures, or long-running agent traces into evals, model improvements, SDK features, or runtime changes.
-- **Hybrid & Deterministic Systems:** Combining LLMs with structured code, APIs, typed tools, workflow engines, or deterministic checks to make agent behavior more reliable.
+### Editorial priorities
+Use these weights to judge topical fit across the newsletter:
 
-### 2. Agent Evaluation:
-- **Enterprise Workflow Evals:** Benchmarks and domain-specific evals for agents operating inside real business processes, especially stateful or long-horizon tasks.
-- **Tool Use Reliability:** Measuring and improving tool selection, tool execution, recovery from tool errors, and reliability across multi-step tasks.
-- **Agent-as-a-Judge and Rubrics:** Evaluating agents with agents, modular rubrics, judge calibration, trace review, and domain-specific evaluation sets.
-- **Skills and Agent Capabilities:** How agent skills, tool runtimes, orchestration, or workflow abstractions change agent reliability and task success.
+1. **Agent evaluation, optimization, and loop engineering (30%)**
+   - Loop engineering means designing and operating closed feedback systems that turn traces, failures, human or domain-expert labels, and eval results into versioned changes to judges, rubrics, prompts, tools, policies, memory, code, or deployment gates.
+   - Prioritize evaluator calibration, meta-evaluation, custom judges, domain-specific eval sets, agent-as-judge methods, trace review, error analysis, and evaluation-to-optimization bridges.
+   - Strong papers make the improvement mechanism explicit, identify who or what supplies the feedback signal, and measure whether the loop improves agent behavior.
 
-### 3. Production Agent Architectures:
-- **Context, Memory, and State:** Context engineering, memory mechanisms, retrieval, file-system abstractions, state management, and context governance.
-- **Agent SDKs and Orchestration:** Agent SDKs, tool-use runtimes, orchestration frameworks, multi-agent coordination, and production deployment patterns.
-- **Realtime and Multimodal Agents:** Voice/audio agents, realtime interaction, latency, interruption handling, spoken tool use, and multimodal agent interfaces.
-- **Production Architectures:** Converting research demos into resilient applications through observability, evaluation loops, context layers, and operational feedback.
+2. **Agent architecture, tools, memory, and orchestration (25%)**
+   - Tool-use reliability, MCP, parallel tool execution, agent skills, deterministic checks, workflow engines, multi-agent coordination, context engineering, memory, compaction, and stateful or long-running execution.
 
-### 4. Governance, Labor, and Impact:
-- **Governance and Certification:** Practical regulation, certification, safety testing, and inference governance for deployed AI systems.
-- **Labor Transformation:** Concrete empirical studies on how agents affect knowledge work, business processes, and organizational adoption.
-- **Policy and Risk:** Prefer papers with measurable system behavior, deployment evidence, or specific evaluation methods over broad commentary.
+3. **Production reliability and LLMOps (20%)**
+   - Tracing, observability, regression detection, CI evaluation, artifact versioning, deployment controls, runtime feedback, recovery from failures, and the transition from pilot to production.
 
-### Scoring Logic Refinement:
-- **Production Agent Signal:** High scores for papers that help understand, evaluate, or build production agent systems.
-- **Feedback Loop Signal:** High scores for work where feedback, traces, evals, or failures change goals, rubrics, prompts, tools, policies, or implementation plans.
-- **Enterprise and Long-Horizon Signal:** High scores for papers about agents in real workflows, domain-specific business tasks, stateful execution, or long-horizon tool use.
-- **Context and Runtime Signal:** High scores for papers about context layers, memory, retrieval, state, realtime/voice agents, tool runtimes, or orchestration.
-- **Metrology Signal:** High scores for papers that identify flaws in evaluation methods or propose better measurements for agent reliability.
-- **Lower Priority Signal:** Pre-training, generic model capability benchmarks, broad policy commentary, or general economic impact should score lower unless tied to concrete deployment, evaluation, or reliable system behavior.
+4. **Safety, governance, and evaluation policy (15%)**
+   - Practical certification, inference governance, safety testing, regulatory measurement, and empirical effects on work or organizations. Prefer concrete mechanisms and evidence over broad commentary.
 
-Here are some example paper titles that I have found interesting lately for additional context:
+5. **Enterprise data systems and applied agents (10%)**
+   - Retrieval, governed data and tools, vector search, lakehouse or data-pipeline patterns, and applied systems in areas such as healthcare, sports, advertising, or public services. Favor transferable engineering or evaluation lessons over narrow applications.
 
-- On the Limitations of Compute Thresholds as a Governance Strategy for Large Language Models
-- Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena
-- Hierarchical Reward Design from Language: Enhancing Alignment of Agent Behavior with Human Specifications
-- Towards Monosemanticity: Decomposing Language Models With Dictionary Learning
-- Judging the Judges: Evaluating Alignment and Vulnerabilities in LLMs-as-Judges
-- LalaEval: A Holistic Human Evaluation Framework for Domain-Specific Large Language Models
-- Large Language Model Influence on Diagnostic Reasoning A Randomized Clinical Trial
-- InsightBench: Evaluating Business Analytics Agents Through Multi-Step Insight Generation
-- Best Practices and Lessons Learned on Synthetic Data for Language Models
-- The Social Impact of Generative LLM-Based AI
-- Agent-as-a-Judge: Evaluate Agents with Agents
-- Constructing Domain-Specific Evaluation Sets for LLM-as-a-judge
-- On LLMs-Driven Synthetic Data Generation, Curation, and Evaluation: A Survey
-- Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters
-- Turn Every Application into an Agent: Towards Efficient Human-Agent-Computer Interaction with API-First LLM-Based Agents
-- A Survey on the Evolution of LLM Agent Memory Mechanisms
-- The End of Reward Engineering: How LLMs Are Rebuilding Multi-Agent Collaboration
-- Context Engineering 2.0: The Context of Context Engineering
-- Everything is Context: Agentic File System Abstractions for Context Engineering
-- SkillsBench: Benchmarking How Well Agent Skills Work Across Diverse Tasks
-- Towards a Science of AI Agent Reliability
+### Paper scoring rubric
+Score each paper from 0 to 1 using:
+- 40% direct fit with loop engineering, agent evaluation, or reliable production agents
+- 25% empirical evidence and evaluation quality
+- 20% production transferability
+- 10% domain-expert feedback or enterprise-workflow relevance
+- 5% novelty or a useful challenge to accepted practice
 
-Rate papers 0-1 based on on a numeric scale:
-- Alignment with above focus areas
-- Emphasis on practical implementation over theory
-- Concrete frameworks or solutions
-- Data-driven approaches
-- Relevance to real-world applications
-- Similarity to example papers provided. If paper titles are not similar it should not be a disqualifying factor, but if paper titles are similar it should be a very strong positive signal.
+Cap papers at 0.5 when they are mainly generic capability benchmarks, pretraining or scaling work without system implications, surveys without meaningful synthesis, broad policy or labor commentary without evidence, or narrow applications without a transferable lesson.
 
-0.0 indicates absolutely no relevance
-0.25 indicates weak or generic relevance
-0.5 indicates borderline relevance, usually not enough unless the paper clearly connects to one of the priority areas
-0.6 indicates clear relevance to one priority area
-0.75 and above indicates significant alignment with production agents, agent evaluation, reliable AI systems, or production architecture
-The score can be within those ranges provided as well if unclear or ambiguous. Do not inflate unclear papers above 0.5.
+Use this scale:
+- 0.0: no meaningful relevance
+- 0.25: weak or generic relevance
+- 0.5: borderline relevance
+- 0.6: clear relevance to a priority area
+- 0.75 or higher: strong alignment, credible evidence, and a useful production, evaluation, or loop-engineering contribution
 
-Provide a response that ONLY contains the rated score and no other text:
+Do not inflate unclear papers. A title may underspecify a relevant contribution, so preserve recall during title-only review when it plausibly signals one of the priority areas.
 
-A score above 0.5 indicates its worth passing to the next stage of paper review."""
+Return only the numeric score with no other text.
+"""
 
-NEWSLETTER_PROMPT = """You are a research assistant creating an AI/ML research newsletter. Your task is to summarize the papers provided. 
+NEWSLETTER_PROMPT = """Create a concise AI research newsletter for a technical practitioner focused on reliable agentic systems, evaluation, loop engineering, and production deployment.
 Your response MUST be valid JSON that can be parsed by a JSON parser. This is critical.
 
 CRITICAL JSON FORMATTING REQUIREMENTS:
@@ -108,11 +76,11 @@ You do NOT define what is a featured vs. additional paper, that information is p
 Example of proper escaping: If a paper title is "AI" Systems, it must be written as "\\"AI\\" Systems" in the JSON.
 
 {
-  "overview": "Brief overview of common themes and key findings across papers, focusing on methodological advancements, practical applications, and emerging trends. Keep it concise - 2-3 sentences maximum.",
+  "overview": "Synthesize genuine common themes without forcing unrelated papers together. Use 2-3 sentences and 50-100 words.",
   "featured_papers": [
     {
       "title": "Full title of the paper",
-      "summary": "A concise 2-3 sentence summary highlighting the key technical contribution, practical implications, and why it matters. Be opinionated but brief. Focus on the most important insight or finding. Maximum 150 words.",
+      "summary": "Use exactly 3 concise sentences and no more than 150 words: contribution; evidence or demonstrated result; production, evaluation, or loop-engineering relevance and the main supported limitation.",
       "link": "https://arxiv.org/abs/paper-id"
     }
   ],
@@ -123,19 +91,25 @@ Example of proper escaping: If a paper title is "AI" Systems, it must be written
     }
   ],
   "metadata": {
-    "generated_date": "2024-11-21",
+    "generated_date": "YYYY-MM-DD",
     "total_papers_analyzed": 10,
     "featured_papers_count": 7,
     "additional_papers_count": 3
   }
 }
 
-IMPORTANT LENGTH REQUIREMENTS:
-- Overview: Maximum 4-6 sentences (150-250 words)
-- Featured paper summaries: Maximum 3-5 sentences (150-250 words each)
-- Be concise and scannable - readers should be able to quickly understand the key points
-- Prioritize clarity and brevity over completeness
-- Write in a formal yet approachable tone suitable for technical professionals - use precise terminology while remaining accessible and engaging
+EDITORIAL AND LENGTH REQUIREMENTS:
+- Overview: 2-3 sentences and 50-100 words
+- Featured paper summaries: exactly 3 sentences and no more than 150 words each
+- Sentence 1 states the concrete contribution
+- Sentence 2 describes the evidence, benchmark, experiment, or demonstrated result
+- Sentence 3 explains why it matters for production agents, evaluation, or loop engineering, including the most important limitation when supported by the source
+- Distinguish demonstrated results from proposals and author claims
+- Never invent results, performance numbers, implications, or limitations
+- Lead with the mechanism, evidence, failure mode, or workflow tradeoff
+- Use a technical, accessible, practical voice that is skeptical of hype
+- Avoid generic openings such as "Interesting paper on" or "This paper shows"
+- Avoid em dashes and "It's not X, it's Y" constructions
 
 Remember: Your output must be valid, parseable JSON with all quotes properly escaped."""
 

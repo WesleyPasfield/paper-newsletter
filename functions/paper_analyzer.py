@@ -5,7 +5,7 @@ import time
 import random
 from openai import APIError, OpenAI
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from bs4 import BeautifulSoup
 from typing import Set, Optional
@@ -172,18 +172,18 @@ class PaperAnalyzer:
             eval_prompt: Prompt for evaluating papers
             newsletter_prompt: Prompt for generating newsletter
             previously_included_papers: Set of previously included paper titles/links
-            model_cheap: Model for cheap operations (default: gpt-5.4-nano)
-            model_expensive: Model for expensive operations (default: gpt-5.4-mini)
-            model_fallback: Fallback model when rate limited (default: gpt-5.4)
-            model_emergency: Emergency fallback model (default: gpt-5)
+            model_cheap: Model for title evaluation (default: gpt-5.6-luna)
+            model_expensive: Model for abstract evaluation and newsletter generation (default: gpt-5.6-luna)
+            model_fallback: First fallback model (default: gpt-5.6-sol)
+            model_emergency: Emergency fallback model (default: gpt-5.5)
         """
         self.client = OpenAI(api_key=openai_api_key)
 
         # Set models with defaults if not provided
-        self.openai_model_cheap = model_cheap or "gpt-5.4-nano"
-        self.openai_model_pricey = model_expensive or "gpt-5.4-mini"
-        self.openai_model_fallback = model_fallback or "gpt-5.4"
-        self.openai_model_emergency = model_emergency or "gpt-5"
+        self.openai_model_cheap = model_cheap or "gpt-5.6-luna"
+        self.openai_model_pricey = model_expensive or "gpt-5.6-luna"
+        self.openai_model_fallback = model_fallback or "gpt-5.6-sol"
+        self.openai_model_emergency = model_emergency or "gpt-5.5"
 
         logger.info(f"Initialized with models - Cheap: {self.openai_model_cheap}, "
                    f"Expensive: {self.openai_model_pricey}, "
@@ -320,13 +320,24 @@ class PaperAnalyzer:
         
         return "unknown"
 
-    def _create_text_response(self, model: str, instructions: str, prompt: str, max_output_tokens: int) -> str:
-        response = self.client.responses.create(
-            model=model,
-            instructions=instructions,
-            input=prompt,
-            max_output_tokens=max_output_tokens
-        )
+    def _create_text_response(
+        self,
+        model: str,
+        instructions: str,
+        prompt: str,
+        max_output_tokens: int,
+        reasoning_effort: Optional[str] = None,
+    ) -> str:
+        request = {
+            'model': model,
+            'instructions': instructions,
+            'input': prompt,
+            'max_output_tokens': max_output_tokens,
+        }
+        if reasoning_effort:
+            request['reasoning'] = {'effort': reasoning_effort}
+
+        response = self.client.responses.create(**request)
         return self._extract_response_text(response)
 
     def _extract_response_text(self, response) -> str:
@@ -537,7 +548,8 @@ class PaperAnalyzer:
                     model=model,
                     instructions=self.eval_prompt,
                     prompt=f"Based on the title, rate interest between 0 and 1 on a numeric scale: {paper.title}",
-                    max_output_tokens=16
+                    max_output_tokens=16,
+                    reasoning_effort='none',
                 ).strip()
                 score = float(response_text)
                 return score if 0 <= score <= 1 else 0.0
@@ -568,7 +580,8 @@ class PaperAnalyzer:
                     model=model,
                     instructions=self.eval_prompt,
                     prompt=f"Based on the abstract, rate interest between 0 and 1 on a numeric scale:\n{paper.abstract}",
-                    max_output_tokens=16
+                    max_output_tokens=16,
+                    reasoning_effort='none',
                 ).strip()
                 score = float(response_text)
                 return score if 0 <= score <= 1 else 0.0
@@ -624,17 +637,14 @@ Full Text:
                 logger.warning(f"Previously included papers count: {len(self.previously_included_papers)}")
                 return "No papers met the interest criteria this week."
 
+            generated_date = datetime.now(timezone.utc).date().isoformat()
             prompt = f"""Follow your instructions for the following papers.
 
 There are {len(full_papers_content)} featured papers and {len(additional_papers)} additional papers
 This process will be deemed a failure if there are not {len(full_papers_content)} papers in the featured papers section of the json object returned
 
-IMPORTANT: Keep all summaries concise and scannable for a newsletter format:
-- Overview: 2-3 sentences maximum (50-100 words)
-- Each featured paper summary: 2-3 sentences maximum (100-150 words)
-- Focus on the most important insights and practical implications, not exhaustive details
-- Be opinionated but brief - readers should quickly understand why this paper matters
-- Prioritize clarity and brevity over completeness
+Set metadata.generated_date to {generated_date}. Ensure every metadata count matches the supplied papers.
+Preserve the supplied title and link for every paper. Apply the editorial voice and single length contract from your instructions.
 
 CRITICAL: You MUST return valid JSON. Your response must start with {{ and end with }}. Do not include any text before or after the JSON object.
 
@@ -660,7 +670,8 @@ Additional Papers. These should not receive a summary in the JSON response:
                     model=model,
                     instructions=self.newsletter_prompt,
                     prompt=prompt,
-                    max_output_tokens=8000
+                    max_output_tokens=8000,
+                    reasoning_effort='medium',
                 )
                 if text_content:
                     logger.info(f"Successfully extracted {len(text_content)} characters from API response")

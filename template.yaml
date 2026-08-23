@@ -54,19 +54,19 @@ Parameters:
     Description: Email address to send test emails to
   OpenAIModelCheap:
     Type: String
-    Default: "gpt-5.4-nano"
-    Description: OpenAI model for cheap/fast operations (paper title evaluation)
+    Default: "gpt-5.6-luna"
+    Description: OpenAI model for paper title evaluation
   OpenAIModelExpensive:
     Type: String
-    Default: "gpt-5.4-mini"
-    Description: OpenAI model for expensive/complex operations (paper abstract evaluation, newsletter generation)
+    Default: "gpt-5.6-luna"
+    Description: OpenAI model for paper abstract evaluation and newsletter generation
   OpenAIModelFallback:
     Type: String
-    Default: "gpt-5.4"
-    Description: Fallback model when rate limits are hit
+    Default: "gpt-5.6-sol"
+    Description: First fallback model when rate limits are hit
   OpenAIModelEmergency:
     Type: String
-    Default: "gpt-5"
+    Default: "gpt-5.5"
     Description: Emergency fallback model for severe rate limiting
 
 Conditions:
