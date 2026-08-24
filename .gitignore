@@ -7,6 +7,11 @@ samconfig.toml
 *.key
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
 .DS_Store
 build/
 .aws-sam/

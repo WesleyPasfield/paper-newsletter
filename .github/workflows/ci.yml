@@ -1,0 +1,53 @@
+name: CI
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: Install application and CI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pip-audit==2.10.1 pytest==8.4.2 ruff==0.16.4
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check high-confidence Python errors
+        run: ruff check functions tests test_improvements.py --select E9,F63,F7,F82
+
+      - name: Validate SAM template
+        run: sam validate --lint --template-file template.yaml
+
+      - name: Build SAM application
+        run: sam build --parallel --template-file template.yaml
+
+      - name: Audit deployment dependencies
+        run: pip-audit --strict --requirement requirements.txt

@@ -68,25 +68,93 @@ Parameters:
     Type: String
     Default: "gpt-5.5"
     Description: Emergency fallback model for severe rate limiting
+  OpenAISecretName:
+    Type: String
+    Default: openai/paper_newsletter_key
+    Description: Secrets Manager secret containing the openai_key JSON field
+  NewsletterScheduleExpression:
+    Type: String
+    Default: "cron(0 12 ? * TUE *)"
+    Description: EventBridge schedule expression for newsletter generation; cron expressions use UTC
+  NewsletterScheduleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enables the automated newsletter schedule
+  NewsletterCadenceDescription:
+    Type: String
+    Default: weekly on Tuesdays
+    Description: Human-readable cadence used in subscriber-facing copy
+  VerificationReminderScheduleExpression:
+    Type: String
+    Default: "rate(1 hour)"
+    Description: EventBridge schedule expression for automatic verification reminders
+  VerificationReminderScheduleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enables automatic one-time verification reminders
+  SubscribeCooldownSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    Description: Minimum time before another verification message can be requested for an address
+  PendingSubscriberTtlDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    Description: Days to retain unverified subscriber records before DynamoDB TTL cleanup
+  BulkVerificationMaxBatch:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 500
+    Description: Hard recipient cap for a confirmed bulk verification-reminder run
+  EnableApiWaf:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enables the optional regional WAF rate limit for the public subscribe endpoint
+  SubscribeWafRequestsPerFiveMinutes:
+    Type: Number
+    Default: 1000
+    MinValue: 100
+    Description: Per-IP subscribe requests allowed in a five-minute WAF evaluation window
 
 Conditions:
-  CreateDomainIdentity: !Equals 
+  CreateDomainIdentity: !Equals
     - !Ref UseDomainIdentity
     - "true"
+  CreateEmailIdentity: !Equals
+    - !Ref UseDomainIdentity
+    - "false"
   HasHostedZone: !And
     - !Not [!Equals [!Ref HostedZoneId, ""]]
     - !Condition CreateDomainIdentity
   HasSenderName: !Not [!Equals [!Ref SenderName, ""]]
   HasTrackingDomain: !Not [!Equals [!Ref TrackingDomainName, ""]]
+  ApiWafEnabled: !Equals [!Ref EnableApiWaf, "true"]
+  NewsletterScheduleIsEnabled: !Equals [!Ref NewsletterScheduleEnabled, "true"]
 
 Globals:
   Function:
     Runtime: python3.11
     Timeout: 30
     MemorySize: 256
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: WARN
     Environment:
       Variables:
         SUBSCRIBERS_TABLE: !Ref SubscribersTable
+        NEWSLETTER_RUNS_TABLE: !Ref NewsletterRunsTable
         EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
         Stage: !Ref Stage
@@ -98,12 +166,16 @@ Globals:
         SUBSCRIBE_LANDING_PAGE: !Ref SubLandingPage
         EMAIL_TEST_MODE: !Ref EmailTestMode
         EMAIL_TEST_ADDRESS: !Ref EmailTestAddress
+        SUBSCRIBE_COOLDOWN_SECONDS: !Ref SubscribeCooldownSeconds
+        PENDING_SUBSCRIBER_TTL_DAYS: !Ref PendingSubscriberTtlDays
+        BULK_VERIFICATION_MAX_BATCH: !Ref BulkVerificationMaxBatch
+        NEWSLETTER_CADENCE_DESCRIPTION: !Ref NewsletterCadenceDescription
         OPENAI_MODEL_CHEAP: !Ref OpenAIModelCheap
         OPENAI_MODEL_EXPENSIVE: !Ref OpenAIModelExpensive
         OPENAI_MODEL_FALLBACK: !Ref OpenAIModelFallback
         OPENAI_MODEL_EMERGENCY: !Ref OpenAIModelEmergency
         VERIFICATION_TEMPLATE_NAME: !Sub "${AWS::StackName}-verification-template"
-        NEWSLETTER_TEMPLATE_NAME: !Sub "${AWS::StackName}-newsletter-template"
+        NEWSLETTER_TEMPLATE_NAME: !Sub "${AWS::StackName}-newsletter-template-v2"
     Tags:
       Environment: !Ref Stage
       Service: ai-research-newsletter
@@ -131,10 +203,64 @@ Resources:
           MetricsEnabled: true
           DataTraceEnabled: false
           LoggingLevel: INFO
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 25
+        - ResourcePath: "/subscribe"
+          HttpMethod: "POST"
+          MetricsEnabled: true
+          DataTraceEnabled: false
+          LoggingLevel: INFO
+          ThrottlingBurstLimit: 5
+          ThrottlingRateLimit: 2
+
+  ApiWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: ApiWafEnabled
+    Properties:
+      Name: !Sub "${AWS::StackName}-subscribe-rate-limit"
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AWS::StackName}-api-waf"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: SubscribeRateLimit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref SubscribeWafRequestsPerFiveMinutes
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: EXACTLY
+                  SearchString: /subscribe
+                  TextTransformations:
+                    - Priority: 0
+                      Type: NONE
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${AWS::StackName}-subscribe-rate-limit"
+            SampledRequestsEnabled: true
+
+  ApiWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: ApiWafEnabled
+    DependsOn: ApiGatewayApiStage
+    Properties:
+      ResourceArn: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${ApiGatewayApi}/stages/${Stage}"
+      WebACLArn: !GetAtt ApiWebACL.Arn
 
   # Define DynamoDB table before functions that depend on it
   SubscribersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "${AWS::StackName}-subscribers"
       AttributeDefinitions:
@@ -148,6 +274,9 @@ Resources:
       BillingMode: PAY_PER_REQUEST
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: pending_expires_at
+        Enabled: true
       GlobalSecondaryIndexes:
         - IndexName: StatusIndex
           KeySchema:
@@ -155,6 +284,29 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+
+  NewsletterRunsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-newsletter-runs"
+      AttributeDefinitions:
+        - AttributeName: issue_id
+          AttributeType: S
+        - AttributeName: recipient_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: issue_id
+          KeyType: HASH
+        - AttributeName: recipient_id
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
 
   # SES Configuration Set
   EmailConfigurationSet:
@@ -170,9 +322,374 @@ Resources:
         - CustomRedirectDomain: !Ref TrackingDomainName
         - !Ref AWS::NoValue
 
+  SESFeedbackTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName} SES feedback"
+
+  SESFeedbackTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SESFeedbackTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSESPublish
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SESFeedbackTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${EmailConfigurationSet}"
+
+  SESFeedbackEventDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref EmailConfigurationSet
+      EventDestination:
+        Name: !Sub "${AWS::StackName}-feedback-events"
+        Enabled: true
+        MatchingEventTypes:
+          - send
+          - reject
+          - delivery
+          - bounce
+          - complaint
+          - renderingFailure
+        SnsDestination:
+          TopicARN: !Ref SESFeedbackTopic
+
+  SESCloudWatchEventDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref EmailConfigurationSet
+      EventDestination:
+        Name: !Sub "${AWS::StackName}-cloudwatch-events"
+        Enabled: true
+        MatchingEventTypes:
+          - send
+          - reject
+          - delivery
+          - bounce
+          - complaint
+          - renderingFailure
+        CloudWatchDestination:
+          DimensionConfigurations:
+            - DimensionName: EmailType
+              DimensionValueSource: messageTag
+              DefaultDimensionValue: transactional
+
+  NewsletterTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: !Sub "${AWS::StackName}-newsletter-template-v2"
+        SubjectPart: "AI Papers Newsletter: {{featured_count}} New Papers This Week"
+        HtmlPart: |
+          <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+          <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <meta name="color-scheme" content="light dark">
+              <meta name="supported-color-schemes" content="light dark">
+              <!--[if !mso]><!-->
+              <meta http-equiv="X-UA-Compatible" content="IE=edge">
+              <!--<![endif]-->
+              <title>AI Papers Newsletter</title>
+              <style type="text/css">
+                  /* Reset styles */
+                  body, #bodyTable { margin:0; padding:0; width:100% !important; }
+                  img { border:0; height:auto; line-height:100%; outline:none; text-decoration:none; }
+                  table { border-collapse:collapse !important; }
+
+                  /* Client-specific styles */
+                  #outlook a { padding:0; }
+                  .ReadMsgBody { width:100%; }
+                  .ExternalClass { width:100%; }
+                  .ExternalClass, .ExternalClass p, .ExternalClass span, .ExternalClass font,
+                  .ExternalClass td, .ExternalClass div { line-height:100%; }
+
+                  /* Dark mode styles */
+                  @media (prefers-color-scheme: dark) {
+                      .dark-bg { background-color: #1a1a1a !important; }
+                      .dark-text { color: #ffffff !important; }
+                      .paper { border-left-color: #4a9eff !important; background-color: #232323 !important; }
+                      .paper h3 a { color: #4a9eff !important; }
+                      .header { background-color: #1a1a1a !important; }
+                      .body { background-color: #1a1a1a !important; }
+                      .container { background-color: #232323 !important; }
+                      .footer { border-color: #333333 !important; color: #ffffff !important; }
+                      .metadata { color: #cccccc !important; }
+                  }
+
+                  /* Responsive styles */
+                  @media screen and (max-width: 600px) {
+                      .container { width: 100% !important; }
+                      .paper { margin: 15px !important; }
+                      .header { padding: 15px !important; }
+                      .social-button { display: block !important; margin: 10px auto !important; }
+                  }
+
+                  /* Base styles */
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                      line-height: 1.6;
+                      color: #333333;
+                      background-color: #f8f9fa;
+                  }
+                  .container {
+                      max-width: 600px;
+                      margin: 0 auto;
+                      background-color: #ffffff;
+                  }
+                  .header {
+                      background-color: #f8f9fa;
+                      padding: 30px;
+                      text-align: center;
+                      border-bottom: 1px solid #eeeeee;
+                  }
+                  .paper {
+                      margin: 20px;
+                      padding: 20px;
+                      border-left: 4px solid #007bff;
+                      background-color: #f8f9fa;
+                  }
+                  .paper h3 {
+                      margin-top: 0;
+                      margin-bottom: 15px;
+                      color: #007bff;
+                  }
+                  .paper a {
+                      color: #007bff;
+                      text-decoration: none;
+                  }
+                  .paper a:hover {
+                      text-decoration: underline;
+                  }
+                  .footer {
+                      margin-top: 30px;
+                      padding: 20px;
+                      border-top: 1px solid #eeeeee;
+                      font-size: 14px;
+                      text-align: center;
+                      color: #666666;
+                  }
+                  .metadata {
+                      font-size: 14px;
+                      color: #666666;
+                      margin-bottom: 10px;
+                  }
+                  .social-section {
+                      padding: 20px;
+                      text-align: center;
+                      border-top: 1px solid #eeeeee;
+                      margin-top: 20px;
+                  }
+                  .social-button {
+                      display: inline-block;
+                      padding: 6px 12px;
+                      margin: 0 5px;
+                      font-size: 12px;
+                      border-radius: 4px;
+                      text-decoration: none;
+                  }
+              </style>
+              <!--[if mso]>
+              <style type="text/css">
+                  .fallback-font {
+                      font-family: Arial, sans-serif;
+                  }
+              </style>
+              <![endif]-->
+          </head>
+          <body class="dark-bg">
+              <!-- Preview Text -->
+              <div style="display: none; max-height: 0px; overflow: hidden;">
+                  Your weekly AI papers digest - {{featured_count}} new papers on practical AI implementation and regulation
+                  &nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
+              </div>
+
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" id="bodyTable">
+                  <tr>
+                      <td align="center" valign="top">
+                          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="600" class="container">
+                              <!-- Header -->
+                              <tr>
+                                  <td align="center" valign="top" class="header">
+                                      <h1 class="dark-text fallback-font">AI Papers Newsletter</h1>
+                                  </td>
+                              </tr>
+
+                              <!-- Overview -->
+                              <tr>
+                                  <td align="left" valign="top" style="padding: 20px;" class="dark-text fallback-font">
+                                      {{{overview_html}}}
+                                  </td>
+                              </tr>
+
+                              <!-- Featured Papers -->
+                              <tr>
+                                  <td align="left" valign="top" style="padding: 0 20px;">
+                                      <h2 class="dark-text fallback-font">Featured Research</h2>
+                                      {{#each featured_papers_html}}
+                                      <div class="paper">
+                                          <h3 class="fallback-font"><a href="{{{link}}}">{{{title}}}</a></h3>
+                                          <p class="dark-text fallback-font">{{{summary}}}</p>
+                                      </div>
+                                      {{/each}}
+                                  </td>
+                              </tr>
+
+                              <!-- Additional Papers -->
+                              {{#if additional_papers_html}}
+                              <tr>
+                                  <td align="left" valign="top" style="padding: 0 20px;">
+                                      <h2 class="dark-text fallback-font">Additional Papers</h2>
+                                      {{#each additional_papers_html}}
+                                      <div class="metadata fallback-font">
+                                          • <a href="{{{link}}}">{{{title}}}</a>
+                                      </div>
+                                      {{/each}}
+                                  </td>
+                              </tr>
+                              {{/if}}
+
+                              <!-- Social Sharing Section -->
+                              <tr>
+                                  <td align="center" valign="top" class="social-section">
+                                      <p style="margin-bottom: 15px; color: #666666; font-size: 14px;">Share this newsletter:</p>
+                                      <a href="https://twitter.com/intent/tweet?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation&amp;url={{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #000000; color: #ffffff;">Share on X</a>
+                                      <a href="https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20featuring%20{{featured_count}}%20new%20papers%20on%20AI%20research%20and%20implementation%20{{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #0085ff; color: #ffffff;">Share on Bluesky</a>
+                                      <a href="https://www.linkedin.com/sharing/share-offsite/?url={{{subscribe_url_html}}}" target="_blank" class="social-button" style="background-color: #0077b5; color: #ffffff;">Share on LinkedIn</a>
+                                      <a href="mailto:?subject=AI%20Papers%20Newsletter&amp;body=I%20thought%20you%20might%20be%20interested%20in%20this%20AI%20research%20newsletter.%20Check%20it%20out%20at%20{{{subscribe_url_html}}}" class="social-button" style="background-color: #666666; color: #ffffff;">Share via Email</a>
+                                  </td>
+                              </tr>
+
+                              <!-- Footer -->
+                              <tr>
+                                  <td align="center" valign="top" class="footer">
+                                      <p class="dark-text fallback-font">
+                                          <a href="{{{unsubscribe_url_html}}}" style="color: #666666;">Unsubscribe</a>
+                                      </p>
+                                      <p class="dark-text fallback-font">
+                                          Was this forwarded to you? <a href="{{{subscribe_url_html}}}" style="color: #666666;">Subscribe or contact here</a>
+                                      </p>
+                                      <p class="dark-text fallback-font">
+                                          Check out the <a href="https://wesleypasfield.substack.com/" style="color: #666666;">blog</a> for more AI related content
+                                      </p>
+                                      <p class="dark-text fallback-font">
+                                          You received this because you subscribed to the AI Papers Newsletter.<br>
+                                      </p>
+                                  </td>
+                              </tr>
+                          </table>
+                      </td>
+                  </tr>
+              </table>
+          </body>
+          </html>
+        TextPart: |
+          AI Papers Newsletter
+
+          {{overview}}
+
+          Featured Papers:
+          {{#each featured_papers}}
+          * {{title}}
+          {{summary}}
+          Link: {{{link}}}
+
+          {{/each}}
+          {{#if additional_papers}}
+          Additional Papers:
+          {{#each additional_papers}}
+          * {{title}} - {{{link}}}
+          {{/each}}
+          {{/if}}
+
+          Share this newsletter:
+          - Twitter/X: https://twitter.com/intent/tweet?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter&url={{subscribe_url}}
+          - Bluesky: https://bsky.app/intent/compose?text=Check%20out%20this%20week%27s%20AI%20Papers%20Newsletter%20{{subscribe_url}}
+          - LinkedIn: https://www.linkedin.com/sharing/share-offsite/?url={{subscribe_url}}
+
+          Check out the blog for more AI related content: https://wesleypasfield.substack.com/
+          Was this forwarded to you? Subscribe or contact at: {{{subscribe_url}}}
+          To unsubscribe: {{{unsubscribe_url}}}
+
+  NewsletterLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/newsletter"
+      RetentionInDays: 30
+
+  SubscribeLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/subscribe"
+      RetentionInDays: 30
+
+  VerifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/verify"
+      RetentionInDays: 30
+
+  VerificationReminderLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/verification-reminder"
+      RetentionInDays: 30
+
+  UnsubscribeLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/unsubscribe"
+      RetentionInDays: 30
+
+  SubscriberMetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/subscriber-metrics"
+      RetentionInDays: 30
+
+  BulkVerifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/bulk-verification-reminders"
+      RetentionInDays: 30
+
+  SESFeedbackLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}/ses-feedback"
+      RetentionInDays: 30
+
   # Lambda Functions
   NewsletterFunction:
     Type: AWS::Serverless::Function
+    DependsOn: NewsletterTemplate
     Properties:
       CodeUri: .
       Handler: functions.newsletter_generator.lambda_handler
@@ -180,41 +697,57 @@ Resources:
       Timeout: 900
       MemorySize: 256
       ReservedConcurrentExecutions: 1
+      LoggingConfig:
+        LogGroup: !Ref NewsletterLogGroup
       Environment:
         Variables:
-          OPENAI_SECRET_NAME: openai/paper_newsletter_key
+          OPENAI_SECRET_NAME: !Ref OpenAISecretName
           EMAIL_CONFIGURATION_SET: !Ref EmailConfigurationSet
           LOG_LEVEL: INFO
           NEWSLETTER_BUCKET: !Ref NewsletterBucket
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action: 
-                - "secretsmanager:GetSecretValue"
-              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openai/paper_newsletter_key-*"
+              Action:
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt SubscribersTable.Arn
+                - !Join ["/", [!GetAtt SubscribersTable.Arn, "index/*"]]
             - Effect: Allow
               Action:
-                - ses:SendRawEmail
-                - ses:CreateTemplate
-                - ses:UpdateTemplate
-                - ses:DeleteTemplate
-                - ses:GetTemplate
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt NewsletterRunsTable.Arn
+            - Effect: Allow
+              Action:
+                - "secretsmanager:GetSecretValue"
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${OpenAISecretName}-*"
+            - Effect: Allow
+              Action:
                 - ses:SendBulkTemplatedEmail
-                - ses:SendEmail
-                - ses:SendTemplatedEmail
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:template/${AWS::StackName}-newsletter-template-v2"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${EmailConfigurationSet}"
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
               Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: Newsletter/Issues
       Events:
         Schedule:
           Type: Schedule
           Properties:
-            Schedule: cron(0 12 ? * TUE *)
+            Schedule: !Ref NewsletterScheduleExpression
             Name: !Sub "${AWS::StackName}-newsletter-schedule-event"
             Description: "Newsletter generation schedule event"
-            Enabled: true
-            Input: !Sub '{"api_url":"https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"}'
+            Enabled: !Equals [!Ref NewsletterScheduleEnabled, "true"]
+            Input: !Sub '{"api_url":"https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}","confirm_send":true}'
 
   SubscribeFunction:
     Type: AWS::Serverless::Function
@@ -222,15 +755,24 @@ Resources:
     Properties:
       CodeUri: .
       Handler: functions.email_sender.add_subscriber
+      LoggingConfig:
+        LogGroup: !Ref SubscribeLogGroup
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt SubscribersTable.Arn
+            - Effect: Allow
+              Action:
                 - ses:SendTemplatedEmail
-              Resource: "*"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:template/${AWS::StackName}-verification-template"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${EmailConfigurationSet}"
       Events:
         SubscribePost:
           Type: Api
@@ -250,20 +792,19 @@ Resources:
     Properties:
       CodeUri: .
       Handler: functions.email_sender.verify_subscriber
+      LoggingConfig:
+        LogGroup: !Ref VerifyLogGroup
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
-                - ses:SendTemplatedEmail
-                - ses:SendEmail
-                - ses:GetTemplate
-              Resource: "*"
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt SubscribersTable.Arn
       Events:
         VerifyGet:
           Type: Api
@@ -271,6 +812,14 @@ Resources:
             RestApiId: !Ref ApiGatewayApi
             Path: /verify
             Method: GET
+            Auth:
+              Authorizer: NONE
+        VerifyPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /verify
+            Method: POST
             Auth:
               Authorizer: NONE
         VerifyOptions:
@@ -289,32 +838,44 @@ Resources:
       CodeUri: .
       Handler: functions.email_sender.check_and_resend_verifications
       Description: "Sends one-time verification reminders to unverified subscribers after 48 hours"
+      LoggingConfig:
+        LogGroup: !Ref VerificationReminderLogGroup
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt SubscribersTable.Arn
+                - !Join ["/", [!GetAtt SubscribersTable.Arn, "index/*"]]
+            - Effect: Allow
+              Action:
                 - ses:SendTemplatedEmail
-                - ses:SendEmail
-                - ses:GetTemplate
-              Resource: "*"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:template/${AWS::StackName}-verification-template"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${EmailConfigurationSet}"
             - Effect: Allow
               Action:
                 - cloudwatch:PutMetricData
               Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: Newsletter/Verification
       Events:
         Schedule:
           Type: Schedule
           Properties:
-            Schedule: rate(1 hour)
+            Schedule: !Ref VerificationReminderScheduleExpression
             Name: !Sub "${AWS::StackName}-verification-reminder-schedule"
             Description: "Check for unverified subscribers hourly"
-            Enabled: true
+            Enabled: !Equals [!Ref VerificationReminderScheduleEnabled, "true"]
             Input: !Sub '{"api_url":"https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"}'
 
   VerificationReminderDashboard:
@@ -376,12 +937,19 @@ Resources:
     Properties:
       CodeUri: .
       Handler: functions.email_sender.unsubscribe_handler
+      LoggingConfig:
+        LogGroup: !Ref UnsubscribeLogGroup
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt SubscribersTable.Arn
       Events:
         UnsubscribeGet:
           Type: Api
@@ -413,6 +981,8 @@ Resources:
     Properties:
       CodeUri: .
       Handler: functions.email_sender.sub_status_checker
+      LoggingConfig:
+        LogGroup: !Ref SubscriberMetricsLogGroup
       Environment:
         Variables:
           SUBSCRIBERS_TABLE: !Ref SubscribersTable
@@ -443,18 +1013,29 @@ Resources:
       Handler: functions.email_sender.bulk_verifier
       Description: "Manually triggered bulk verification reminder sender"
       Timeout: 300
+      LoggingConfig:
+        LogGroup: !Ref BulkVerifierLogGroup
       Environment:
         Variables:
           BULK_VERIFICATION_SEND_RATE: "10"
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SubscribersTable
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
               Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt SubscribersTable.Arn
+                - !Join ["/", [!GetAtt SubscribersTable.Arn, "index/*"]]
+            - Effect: Allow
+              Action:
                 - ses:SendTemplatedEmail
-              Resource: "*"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:template/${AWS::StackName}-verification-template"
+                - !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${EmailConfigurationSet}"
       Events:
         BulkVerifyPost:
           Type: Api
@@ -470,6 +1051,45 @@ Resources:
             RestApiId: !Ref ApiGatewayApi
             Path: /bulk-verify
             Method: OPTIONS
+
+  SESFeedbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: functions.email_sender.ses_event_handler
+      Description: "Records SES acceptance and delivery feedback and suppresses risky recipients"
+      LoggingConfig:
+        LogGroup: !Ref SESFeedbackLogGroup
+      Environment:
+        Variables:
+          SUBSCRIBERS_TABLE: !Ref SubscribersTable
+          NEWSLETTER_RUNS_TABLE: !Ref NewsletterRunsTable
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt SubscribersTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt NewsletterRunsTable.Arn
+
+  SESFeedbackSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SESFeedbackTopic
+      Protocol: lambda
+      Endpoint: !GetAtt SESFeedbackFunction.Arn
+
+  SESFeedbackInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SESFeedbackFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SESFeedbackTopic
 
   # Monitoring Resources
   AlarmTopic:
@@ -538,11 +1158,273 @@ Resources:
       AlarmActions:
         - !Ref AlarmTopic
 
+  SubscribeFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${SubscribeFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SubscribeFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  UnsubscribeFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${UnsubscribeFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UnsubscribeFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SubscriberMetricsFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${SubscriberMetricsFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SubscriberMetricsFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  BulkVerifierFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${BulkVerifierFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BulkVerifierFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SESFeedbackFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Alert when ${SESFeedbackFunction} has errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SESFeedbackFunction
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  NewsletterMissingIssueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: NewsletterScheduleIsEnabled
+    Properties:
+      AlarmDescription: "Alert when no newsletter issue becomes ready for seven consecutive days"
+      MetricName: IssueReady
+      Namespace: Newsletter/Issues
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 7
+      DatapointsToAlarm: 7
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  NewsletterIssueFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alert when newsletter issue processing fails or completes partially"
+      Metrics:
+        - Id: generation_failed
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: Newsletter/Issues
+              MetricName: IssueGenerationFailed
+            Period: 300
+            Stat: Sum
+        - Id: failed
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: Newsletter/Issues
+              MetricName: IssueSubmissionFailed
+            Period: 300
+            Stat: Sum
+        - Id: partial
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: Newsletter/Issues
+              MetricName: IssueSubmissionPartial
+            Period: 300
+            Stat: Sum
+        - Id: failures
+          Expression: generation_failed + failed + partial
+          Label: Failed generation or failed or partial newsletter submissions
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SESNewsletterBounceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alert when five or more newsletter or verification messages bounce within one hour"
+      Metrics:
+        - Id: newsletter_bounce
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Bounce
+              Dimensions:
+                - Name: EmailType
+                  Value: newsletter
+            Period: 3600
+            Stat: Sum
+        - Id: verification_bounce
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Bounce
+              Dimensions:
+                - Name: EmailType
+                  Value: verification
+            Period: 3600
+            Stat: Sum
+        - Id: reminder_bounce
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Bounce
+              Dimensions:
+                - Name: EmailType
+                  Value: verification_reminder
+            Period: 3600
+            Stat: Sum
+        - Id: total_bounces
+          Expression: newsletter_bounce + verification_bounce + reminder_bounce
+          Label: Total bounces
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  SESNewsletterComplaintAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alert on any newsletter or verification complaint"
+      Metrics:
+        - Id: newsletter_complaint
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Complaint
+              Dimensions:
+                - Name: EmailType
+                  Value: newsletter
+            Period: 3600
+            Stat: Sum
+        - Id: verification_complaint
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Complaint
+              Dimensions:
+                - Name: EmailType
+                  Value: verification
+            Period: 3600
+            Stat: Sum
+        - Id: reminder_complaint
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/SES
+              MetricName: Complaint
+              Dimensions:
+                - Name: EmailType
+                  Value: verification_reminder
+            Period: 3600
+            Stat: Sum
+        - Id: total_complaints
+          Expression: newsletter_complaint + verification_complaint + reminder_complaint
+          Label: Total complaints
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
   # S3 bucket to store final newsletters
   NewsletterBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
+      # Keep the deployed bucket name to avoid replacing production history.
       BucketName: !Sub "${AWS::StackName}-newsletters"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
       LifecycleConfiguration:
         Rules:
           - Id: ArchiveOldNewsletters
@@ -550,12 +1432,15 @@ Resources:
             Transitions:
               - TransitionInDays: 90
                 StorageClass: INTELLIGENT_TIERING
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING
 
   NewsletterFunctionBucketPolicy:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub "${AWS::StackName}-newsletter-bucket-policy"
-      Roles: 
+      Roles:
         - !Ref NewsletterFunctionRole
       PolicyDocument:
         Version: "2012-10-17"
@@ -572,15 +1457,15 @@ Resources:
 
   # SES Resources
 
-  EmailIdentity: # Single email identify verification
+  EmailIdentity: # Single email identity verification
     Type: AWS::SES::EmailIdentity
+    Condition: CreateEmailIdentity
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      # Preserve the existing stack resource identifier while Lambda uses the
-      # separately composed From header from Globals.Function.Environment.
-      EmailIdentity: !If
-        - HasSenderName
-        - !Sub "${SenderName} <${SenderEmail}>"
-        - !Ref SenderEmail
+      # SES identities accept an email address or domain. The optional display
+      # name is applied only to the SENDER_EMAIL From header in Globals.
+      EmailIdentity: !Ref SenderEmail
       ConfigurationSetAttributes:
         ConfigurationSetName: !Ref EmailConfigurationSet
       DkimAttributes:
@@ -599,7 +1484,7 @@ Resources:
   # Domain verification and SPF records only
   SESDomainVerificationRecords:
     Type: AWS::Route53::RecordSetGroup
-    Condition: HasHostedZone 
+    Condition: HasHostedZone
     DependsOn: SESDomain
     Properties:
       HostedZoneId: !Ref HostedZoneId
@@ -649,7 +1534,7 @@ Resources:
           </html>
         TextPart: |
           You've been successfully unsubscribed from the AI Paper Newsletter.
-          
+
           Email: {{email}}
 
   VerificationTemplate:
@@ -738,16 +1623,16 @@ Resources:
           </html>
         TextPart: |
           Welcome to the AI Papers Newsletter!
-          
+
           Thank you for subscribing. Please verify your email address to start receiving our weekly newsletter featuring the latest AI research papers.
-          
+
           Click this link to verify your subscription:
           {{verification_url}}
-          
+
           If the link doesn't work, copy and paste the URL into your browser.
-          
+
           This verification link will expire in 7 days. If you didn't subscribe to this newsletter, you can safely ignore this email.
-          
+
           You received this email because someone (hopefully you!) subscribed to the AI Papers Newsletter at {{email}}
 
   WelcomeTemplate:
@@ -756,20 +1641,24 @@ Resources:
       Template:
         TemplateName: !Sub "${AWS::StackName}-welcome-template"
         SubjectPart: "Welcome to AI Papers Newsletter"
-        HtmlPart: |
+        HtmlPart: !Sub |
           <!DOCTYPE html>
-            <html>
-            <head>
-              <meta charset="UTF-8">
-              <h2>Welcome to the AI Papers Newsletter!</h2>
-              <p>Your subscription has been confirmed.</p>
-              <p>You'll start receiving our curated AI research updates soon. We currently send them every Monday and Friday </p>
-            </head>
-            </html>
-        TextPart: |
-            Welcome to the AI Papers Newsletter!
-            Your subscription has been confirmed.
-            You'll start receiving our curated AI research updates soon. We currently send them every Monday and Friday
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Welcome to the AI Papers Newsletter</title>
+          </head>
+          <body>
+            <h2>Welcome to the AI Papers Newsletter!</h2>
+            <p>Your subscription has been confirmed.</p>
+            <p>You'll start receiving curated AI research updates ${NewsletterCadenceDescription}.</p>
+          </body>
+          </html>
+        TextPart: !Sub |
+          Welcome to the AI Papers Newsletter!
+          Your subscription has been confirmed.
+          You'll start receiving curated AI research updates ${NewsletterCadenceDescription}.
 
   NewsletterDashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -798,14 +1687,6 @@ Resources:
           ]
         }
 
-  LogGroup:
-    Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}"
-      RetentionInDays: 30
-
 Outputs:
   ApiEndpoint:
     Description: API Gateway endpoint URL
@@ -819,6 +1700,12 @@ Outputs:
   SubscribersTableName:
     Description: Name of DynamoDB table storing subscribers
     Value: !Ref SubscribersTable
+  NewsletterRunsTableName:
+    Description: Name of DynamoDB table storing issue and recipient submission state
+    Value: !Ref NewsletterRunsTable
+  SESFeedbackTopicARN:
+    Description: SNS topic receiving SES submission and delivery feedback
+    Value: !Ref SESFeedbackTopic
   AlarmTopicARN:
     Description: SNS Topic ARN for CloudWatch Alarms
     Value: !Ref AlarmTopic
@@ -835,3 +1722,7 @@ Outputs:
     Condition: CreateDomainIdentity
     Description: SES Domain Status
     Value: !Ref SESDomain
+  ApiWebACLArn:
+    Condition: ApiWafEnabled
+    Description: Optional regional WAF web ACL protecting the subscribe endpoint
+    Value: !GetAtt ApiWebACL.Arn

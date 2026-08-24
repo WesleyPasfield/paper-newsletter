@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "instructions": "Import 60 to 100 real papers, then have Wesley label them. Nulls are deliberate and must not be treated as human judgments.",
+  "paper_fields": {
+    "paper_id": "immutable source identifier",
+    "title": "source title",
+    "link": "canonical source URL",
+    "abstract": "source abstract",
+    "label": "must_include | acceptable | exclude | null",
+    "preferred_rank": "positive integer | null",
+    "primary_bucket": "human-assigned editorial bucket | null"
+  },
+  "summary_pair_fields": {
+    "pair_id": "unique comparison identifier",
+    "paper_id": "identifier present in papers",
+    "summary_a": "first candidate summary",
+    "summary_b": "second candidate summary",
+    "preferred": "a | b | tie | null"
+  },
+  "papers": [],
+  "summary_pairs": []
+}
