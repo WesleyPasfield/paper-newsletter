@@ -36,7 +36,12 @@ def safe_ses_tag_value(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]", "_", str(value))[:256]
 
 
-def claim_newsletter_delivery(delivery_table, issue_id: str, recipient_id: str) -> bool:
+def claim_newsletter_delivery(
+    delivery_table,
+    issue_id: str,
+    recipient_id: str,
+    retry_pre_ses_access_denied: bool = False,
+) -> bool:
     if delivery_table is None:
         return True
     now = utc_now()
@@ -51,6 +56,42 @@ def claim_newsletter_delivery(delivery_table, issue_id: str, recipient_id: str) 
                 "expires_at": delivery_expiry_epoch(now),
             },
             ConditionExpression="attribute_not_exists(issue_id) AND attribute_not_exists(recipient_id)",
+        )
+        return True
+    except ClientError as error:
+        if (
+            error.response.get("Error", {}).get("Code")
+            != "ConditionalCheckFailedException"
+        ):
+            raise
+        if not retry_pre_ses_access_denied:
+            return False
+
+    # A caller may explicitly recover one known pre-SES IAM denial. The stored
+    # error proves SES did not accept the request, and the recovery marker keeps
+    # repeated invocations from claiming the same recipient again.
+    now = utc_now()
+    try:
+        delivery_table.update_item(
+            Key={"issue_id": issue_id, "recipient_id": recipient_id},
+            UpdateExpression=(
+                "SET #status = :attempted, attempted_at = :now, "
+                "updated_at = :now, recovery_attempted_at = :now, "
+                "expires_at = :expires_at"
+            ),
+            ConditionExpression=(
+                "#status = :ambiguous AND contains(delivery_error, :access_denied) "
+                "AND attribute_not_exists(ses_message_id) "
+                "AND attribute_not_exists(recovery_attempted_at)"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":attempted": "attempted",
+                ":ambiguous": "ambiguous",
+                ":access_denied": "AccessDenied",
+                ":now": now.isoformat(),
+                ":expires_at": delivery_expiry_epoch(now),
+            },
         )
         return True
     except ClientError as error:

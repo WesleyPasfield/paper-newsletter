@@ -583,6 +583,37 @@ class EmailSenderTests(unittest.TestCase):
         self.assertEqual(second["skipped"], 1)
         ses.send_bulk_templated_email.assert_called_once()
 
+    def test_known_pre_ses_access_denied_can_be_claimed_once_for_recovery(self):
+        table = MagicMock()
+        table.put_item.side_effect = conditional_error("PutItem")
+
+        first_claim = delivery_state.claim_newsletter_delivery(
+            table,
+            "issue-4",
+            "recipient-4",
+            retry_pre_ses_access_denied=True,
+        )
+
+        self.assertTrue(first_claim)
+        recovery = table.update_item.call_args.kwargs
+        self.assertIn("contains(delivery_error, :access_denied)", recovery["ConditionExpression"])
+        self.assertIn(
+            "attribute_not_exists(recovery_attempted_at)",
+            recovery["ConditionExpression"],
+        )
+        self.assertEqual(
+            recovery["ExpressionAttributeValues"][":access_denied"], "AccessDenied"
+        )
+
+        table.update_item.side_effect = conditional_error()
+        second_claim = delivery_state.claim_newsletter_delivery(
+            table,
+            "issue-4",
+            "recipient-4",
+            retry_pre_ses_access_denied=True,
+        )
+        self.assertFalse(second_claim)
+
     def test_ses_complaint_and_permanent_bounce_suppress_subscriber(self):
         for event_type, details, reason in (
             ("Complaint", {"complaint": {}}, "complaint"),

@@ -1250,6 +1250,7 @@ def send_email_batch(
     subscribe_url: str,
     issue_id: str | None = None,
     delivery_table=None,
+    retry_pre_ses_access_denied: bool = False,
 ) -> dict:
     results = {
         "accepted": 0,
@@ -1293,7 +1294,12 @@ def send_email_batch(
         for subscriber in batch_subscribers:
             email = subscriber["email"]
             recipient_id = subscriber_id(email)
-            if not claim_newsletter_delivery(delivery_table, issue_id, recipient_id):
+            if not claim_newsletter_delivery(
+                delivery_table,
+                issue_id,
+                recipient_id,
+                retry_pre_ses_access_denied=retry_pre_ses_access_denied,
+            ):
                 results["skipped"] += 1
                 continue
             unsubscribe_link = build_api_url(
@@ -1433,6 +1439,7 @@ def send_newsletter(
     api_url: str,
     issue_id: str | None = None,
     delivery_table_name: str | None = None,
+    retry_pre_ses_access_denied: bool = False,
 ) -> dict:
     """Main function to send newsletter to all subscribers"""
     try:
@@ -1487,6 +1494,7 @@ def send_newsletter(
             subscribe_url=subscribe_url,
             issue_id=issue_id,
             delivery_table=delivery_table,
+            retry_pre_ses_access_denied=retry_pre_ses_access_denied,
         )
 
         logger.info(f"Newsletter sending complete. Results: {results}")

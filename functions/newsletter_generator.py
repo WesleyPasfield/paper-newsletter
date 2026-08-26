@@ -1408,6 +1408,9 @@ def lambda_handler(event, context):
             api_url=event.get("api_url") or os.environ.get("API_URL", ""),
             issue_id=issue_id,
             delivery_table_name=os.environ["NEWSLETTER_RUNS_TABLE"],
+            retry_pre_ses_access_denied=event_flag(
+                event, "retry_pre_ses_access_denied"
+            ),
         )
         accepted = email_results.get("accepted", email_results.get("successful", 0))
         failed = email_results.get("failed", 0)
