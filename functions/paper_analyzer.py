@@ -957,25 +957,39 @@ class PaperAnalyzer:
         title_threshold: float = TITLE_SCREEN_FLOOR,
         abstract_threshold: float = FINAL_RELEVANCE_FLOOR,
         now: datetime | None = None,
+        fallback_feed_url: str | None = None,
     ) -> str:
         # The compatibility argument cannot make the recall screen stricter.
         del title_threshold
         now = now or datetime.now(timezone.utc)
         candidates, feed_errors = self.collect_candidates(feed_urls, now=now)
+        fallback_errors: list[str] = []
+        fallback_used = len(candidates) < self.min_featured and bool(fallback_feed_url)
+        if fallback_used and fallback_feed_url:
+            logger.warning(
+                "Primary arXiv feeds produced %s candidates; querying the recent-submission fallback",
+                len(candidates),
+            )
+            fallback_candidates, fallback_errors = self.collect_candidates(
+                [fallback_feed_url], now=now
+            )
+            candidates = (candidates + fallback_candidates)[: self.candidate_pool_size]
         metadata: dict[str, Any] = {
             "discovered": len(candidates),
             "feed_count": len(feed_urls),
             "feed_failures": len(feed_errors),
             "degraded_sources": [error.partition(": ")[0] for error in feed_errors],
+            "fallback_used": fallback_used,
+            "fallback_failures": len(fallback_errors),
         }
-        if feed_urls and len(feed_errors) == len(feed_urls):
+        if not candidates and feed_urls and len(feed_errors) == len(feed_urls):
             return self._pipeline_result(
                 "pipeline_failure",
                 "Paper discovery failed before an issue could be generated.",
                 metadata,
-                error="; ".join(feed_errors),
+                error="; ".join(feed_errors + fallback_errors),
             )
-        if not candidates:
+        if len(candidates) < self.min_featured:
             return self._pipeline_result(
                 "pipeline_failure",
                 "Paper discovery completed without enough real candidates.",

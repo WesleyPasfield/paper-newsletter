@@ -588,6 +588,57 @@ class PaperPipelineTests(unittest.TestCase):
             result["metadata"]["pipeline_status"], "no_qualified_papers"
         )
 
+    def test_recent_submission_fallback_recovers_an_empty_rss_pool(self):
+        papers = [
+            self.paper("2609.01001"),
+            self.paper("2609.01002"),
+            self.paper("2609.01003"),
+        ]
+        for paper in papers:
+            paper.published_date = "2026-09-04"
+
+        def fetch(feed_url):
+            return papers if feed_url == "fallback" else []
+
+        self.analyzer._fetch_feed_candidates = fetch
+        self.analyzer.evaluate_title = lambda _: 0.9
+        self.analyzer.evaluate_abstract_details = lambda _: evaluation(0.8)
+        self.analyzer.get_paper_content = lambda _: ""
+        self.analyzer.create_newsletter = lambda featured, additional, metadata: (
+            json.dumps(metadata)
+        )
+
+        metadata = json.loads(
+            self.analyzer.process_multiple_feeds(
+                ["rss-a", "rss-b"],
+                now=datetime(2026, 9, 8, tzinfo=timezone.utc),
+                fallback_feed_url="fallback",
+            )
+        )
+
+        self.assertTrue(metadata["fallback_used"])
+        self.assertEqual(metadata["fallback_failures"], 0)
+        self.assertEqual(metadata["selected"], 3)
+
+    def test_recent_submission_fallback_keeps_the_minimum_safety_gate(self):
+        papers = [self.paper("2609.02001"), self.paper("2609.02002")]
+        for paper in papers:
+            paper.published_date = "2026-09-04"
+        self.analyzer._fetch_feed_candidates = lambda url: (
+            papers if url == "fallback" else []
+        )
+
+        result = json.loads(
+            self.analyzer.process_multiple_feeds(
+                ["rss"],
+                now=datetime(2026, 9, 8, tzinfo=timezone.utc),
+                fallback_feed_url="fallback",
+            )
+        )
+
+        self.assertEqual(result["metadata"]["pipeline_status"], "pipeline_failure")
+        self.assertIn("Fewer than three", result["metadata"]["error"])
+
     def test_one_model_evaluation_failure_is_skipped_when_three_score(self):
         papers = [
             self.paper("2608.34001"),

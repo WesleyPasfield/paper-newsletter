@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from urllib.parse import urlencode
 
 import boto3
 
@@ -1269,6 +1270,31 @@ def configured_feed_urls() -> list[str]:
     return [f"https://rss.arxiv.org/rss/{category}" for category in categories]
 
 
+def configured_feed_fallback_url(max_results: int) -> str:
+    """Return one recent-submission query for RSS publication gaps."""
+    categories = (
+        "cs.AI",
+        "cs.LG",
+        "cs.CL",
+        "cs.SE",
+        "cs.MA",
+        "cs.CY",
+        "cs.HC",
+        "stat.ML",
+    )
+    query = " OR ".join(f"cat:{category}" for category in categories)
+    parameters = urlencode(
+        {
+            "search_query": query,
+            "start": 0,
+            "max_results": max_results,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
+        }
+    )
+    return f"https://export.arxiv.org/api/query?{parameters}"
+
+
 def _validate_generated_issue(json_content: dict) -> None:
     metadata = json_content.get("metadata", {})
     pipeline_status = metadata.get("pipeline_status")
@@ -1317,7 +1343,10 @@ def _generate_issue(openai_api_key: str, previously_included: set[str]) -> dict:
         model_fallback=model_fallback,
         model_emergency=model_emergency,
     )
-    newsletter_content = analyzer.process_multiple_feeds(configured_feed_urls())
+    newsletter_content = analyzer.process_multiple_feeds(
+        configured_feed_urls(),
+        fallback_feed_url=configured_feed_fallback_url(analyzer.candidate_pool_size),
+    )
     try:
         json_content = json.loads(newsletter_content)
     except json.JSONDecodeError as exc:

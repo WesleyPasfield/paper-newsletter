@@ -22,6 +22,14 @@ def publishable_issue() -> dict:
 
 
 class NewsletterValidationTests(unittest.TestCase):
+    def test_configured_fallback_queries_recent_arxiv_submissions(self):
+        url = newsletter_generator.configured_feed_fallback_url(80)
+
+        self.assertTrue(url.startswith("https://export.arxiv.org/api/query?"))
+        self.assertIn("search_query=cat%3Acs.AI+OR+cat%3Acs.LG", url)
+        self.assertIn("max_results=80", url)
+        self.assertIn("sortBy=submittedDate", url)
+
     def test_rejects_no_qualified_papers_as_a_normal_outcome(self):
         issue = publishable_issue()
         issue["featured_papers"] = []
