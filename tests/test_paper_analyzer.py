@@ -376,7 +376,12 @@ class PaperPipelineTests(unittest.TestCase):
                 return json.dumps(captured)
 
             analyzer.create_newsletter = create
-            return json.loads(analyzer.process_multiple_feeds(feed_order))
+            return json.loads(
+                analyzer.process_multiple_feeds(
+                    feed_order,
+                    now=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                )
+            )
 
         forward = run(["feed-a", "feed-b"])
         reverse = run(["feed-b", "feed-a"])

@@ -662,6 +662,36 @@ class EmailSenderTests(unittest.TestCase):
                 status,
             )
 
+    def test_ses_bounce_classification_is_retained_in_delivery_ledger(self):
+        delivery_table = DeliveryLedgerTable()
+        payload = {
+            "eventType": "Bounce",
+            "mail": {
+                "messageId": "message-1",
+                "destination": ["person@example.com"],
+                "tags": {
+                    "IssueId": ["issue-1"],
+                    "SubscriberId": ["recipient-1"],
+                },
+            },
+            "bounce": {
+                "bounceType": "Transient",
+                "bounceSubType": "MailboxFull",
+            },
+        }
+
+        delivery_state.process_ses_event(payload, delivery_table, FakeTable())
+
+        update = delivery_table.update_calls[-1]
+        self.assertIn("ses_bounce_type", update["UpdateExpression"])
+        self.assertIn("ses_bounce_subtype", update["UpdateExpression"])
+        self.assertEqual(
+            update["ExpressionAttributeValues"][":bounce_type"], "Transient"
+        )
+        self.assertEqual(
+            update["ExpressionAttributeValues"][":bounce_subtype"], "MailboxFull"
+        )
+
     def test_ses_delivery_updates_verification_reminder_state(self):
         subscriber_table = FakeTable(
             {"email": "person@example.com", "status": "pending"}

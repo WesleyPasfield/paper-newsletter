@@ -188,6 +188,8 @@ def update_delivery_from_ses_event(
     recipient_id: str,
     status: str,
     message_id: str | None,
+    bounce_type: str | None = None,
+    bounce_subtype: str | None = None,
 ) -> None:
     values = {
         ":status": status,
@@ -200,6 +202,12 @@ def update_delivery_from_ses_event(
     if message_id:
         expression += ", ses_message_id = :message_id"
         values[":message_id"] = message_id
+    if bounce_type:
+        expression += ", ses_bounce_type = :bounce_type"
+        values[":bounce_type"] = bounce_type[:64]
+    if bounce_subtype:
+        expression += ", ses_bounce_subtype = :bounce_subtype"
+        values[":bounce_subtype"] = bounce_subtype[:64]
 
     condition = None
     if status == "accepted":
@@ -349,6 +357,10 @@ def process_ses_event(event: dict, delivery_table, subscriber_table) -> dict:
         if not recipient_id and destinations:
             recipient_id = subscriber_id(destinations[0])
 
+        bounce = payload.get("bounce") or {}
+        bounce_type = str(bounce.get("bounceType") or "") or None
+        bounce_subtype = str(bounce.get("bounceSubType") or "") or None
+
         if issue_id and recipient_id:
             update_delivery_from_ses_event(
                 delivery_table,
@@ -356,6 +368,8 @@ def process_ses_event(event: dict, delivery_table, subscriber_table) -> dict:
                 recipient_id,
                 status,
                 mail.get("messageId"),
+                bounce_type=bounce_type,
+                bounce_subtype=bounce_subtype,
             )
 
         if email_type in {"verification", "verification_reminder"}:
@@ -370,10 +384,7 @@ def process_ses_event(event: dict, delivery_table, subscriber_table) -> dict:
         should_suppress = status == "complained"
         suppression_reason = "complaint" if should_suppress else None
         if status == "bounced":
-            bounce_type = str(
-                (payload.get("bounce") or {}).get("bounceType", "")
-            ).lower()
-            should_suppress = bounce_type == "permanent"
+            should_suppress = str(bounce_type or "").lower() == "permanent"
             suppression_reason = "permanent_bounce" if should_suppress else None
 
         if should_suppress:
