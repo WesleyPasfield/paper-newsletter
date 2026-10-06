@@ -28,4 +28,4 @@ soupsieve==2.9.2
 tqdm==4.70.0
 typing-extensions==4.16.0
 typing-inspection==0.4.4
-urllib3==2.7.0
+urllib3==2.8.0
