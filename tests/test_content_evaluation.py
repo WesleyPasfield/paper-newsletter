@@ -31,6 +31,21 @@ def record(
 
 
 class ContentEvaluationTests(unittest.TestCase):
+    def test_governance_development_examples_preserve_feedback_provenance(self):
+        dataset = json.loads(
+            Path(__file__).with_name("content_eval_governance_examples.json").read_text()
+        )
+        validate_dataset(dataset, allow_unlabeled=True, require_target_size=False)
+        labeled = [paper for paper in dataset["papers"] if paper["label"] is not None]
+
+        self.assertEqual([paper["paper_id"] for paper in labeled], ["2610.13886"])
+        self.assertEqual(labeled[0]["label"], "acceptable")
+        self.assertEqual(labeled[0]["primary_bucket"], "agent_governance")
+        self.assertIsNone(labeled[0]["preferred_rank"])
+        self.assertEqual(
+            labeled[0]["development_role"], "positive_anchor_used_in_prompt"
+        )
+
     def test_unlabeled_import_template_is_valid_before_population(self):
         template_path = Path(__file__).with_name("content_eval_dataset_template.json")
         template = json.loads(template_path.read_text())

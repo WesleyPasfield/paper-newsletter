@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "purpose": "Rubric-development examples for safe agent deployment and loop engineering. These are not held-out evaluation data. Abstract fields are assistant-written source summaries; fetch the linked primary abstracts for live comparisons. Only X-AgentRed has Wesley's relevance feedback. Nulls are deliberate, not negative labels.",
+  "feedback_date": "2026-10-13",
+  "editorial_feedback": "Governance and loop engineering are equally important and belong together: loop engineering accelerates deployment, while governance enables safe deployment of complex agentic systems. Application-layer controls are the primary governance interest; model-provider safeguards are a secondary interest.",
+  "papers": [
+    {
+      "paper_id": "2610.13886",
+      "title": "X-AgentRed: Red-Teaming Personal Agents in Evolving Multi-Service Ecosystems",
+      "link": "https://arxiv.org/abs/2610.13886",
+      "abstract": "X-AgentRed investigates harmful outcomes that arise when personal agents carry out benign requests across connected services. It represents tool dependencies as a graph and constructs scenarios from paths through that graph. Execution feedback supports further exploration by varying successful paths and repairing blocked preconditions. Experiments on four target agents compare harmful-path discovery and tool coverage with existing red-teaming methods. The study uses a simulated service ecosystem, so it provides deployment-relevant failure evidence without establishing the effectiveness of a production defense.",
+      "abstract_kind": "source_summary",
+      "label": "acceptable",
+      "preferred_rank": null,
+      "primary_bucket": "agent_governance",
+      "feedback_source": "Wesley explicitly described this as a great paper and a curation example. The acceptable label records positive relevance without inventing a must-include judgment or exact rank. The bucket maps that feedback to the revised rubric.",
+      "development_role": "positive_anchor_used_in_prompt"
+    },
+    {
+      "paper_id": "2610.13889",
+      "title": "RATED: Reliability-Aware AI Agent Tool Retrieval via Execution Dynamics",
+      "link": "https://arxiv.org/abs/2610.13889",
+      "abstract": "RATED combines a trained semantic tool retriever with a contextual bandit that changes candidate ordering using execution outcomes. Its EcoAgent dataset supports both offline retrieval evaluation and experiments with injected tool failures. The reported results improve ranking against the ToolLLM retriever and reduce selection of failed tools with little additional latency. This is an execution-feedback mechanism for reliable tool use; the abstract does not establish authority enforcement or other security guarantees.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "loop_engineering_comparison_without_human_label"
+    },
+    {
+      "paper_id": "2610.13806",
+      "title": "FORTE: A Production Framework for Feature Evaluation and Deprecation in Industrial Recommender Systems",
+      "link": "https://arxiv.org/abs/2610.13806",
+      "abstract": "FORTE supports removing features from production recommender systems through perturbation studies, grouped candidate evaluation, retraining, online tests, and tracing downstream dependencies. Two industrial systems demonstrate feature removal without online regressions and report infrastructure savings. One larger candidate removal set failed online guardrails. Its evidence-based release process is relevant production engineering, while its evaluated systems are recommenders rather than complex tool-using agents.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "adjacent_production_engineering_without_human_label"
+    },
+    {
+      "paper_id": "2610.13708",
+      "title": "Adaptive DHiSparse: Speculative Decoding over a Load-Adaptive KV Hierarchy",
+      "link": "https://arxiv.org/abs/2610.13708",
+      "abstract": "Adaptive DHiSparse combines speculative decoding with a hierarchy for key-value cache storage. It adjusts GPU residency with workload pressure and retrieves missing entries from host memory. Experiments report improved output throughput and supported concurrency at long context lengths. Its contribution concerns inference efficiency and resource use; the abstract does not describe an agent improvement loop or controls over agent actions.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "inference_efficiency_comparison_without_human_label"
+    },
+    {
+      "paper_id": "2610.13829",
+      "title": "MC-EvoBench: Auditing Experience-Driven Self-Improvement in Minecraft Agents",
+      "link": "https://arxiv.org/abs/2610.13829",
+      "abstract": "MC-EvoBench tests whether experience gives Minecraft agents capabilities that transfer to later tasks. It resets target worlds, controls interaction budgets, tracks provenance, and uses task graphs with stage-level verification. Related experience does not consistently improve transfer in the reported probes. Early execution failures can prevent later capabilities from being measured. The contribution is a methodology for evaluating persistent improvement, with results limited to its tested environments and agents.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "agent_improvement_evaluation_without_human_label"
+    },
+    {
+      "paper_id": "2610.13755",
+      "title": "Matched-Context Group Policy Optimization for LLM Agent Training",
+      "link": "https://arxiv.org/abs/2610.13755",
+      "abstract": "MCGPO extracts weighted preferences between agent actions by matching contexts in collected rollouts and using terminal outcomes from separate folds. It adds a pairwise learning objective to GraphGPO without a critic. Six environment and model settings report improvements in average task success, with limited seeds and mixed integrated-success gains. The paper studies training credit assignment, so its relevance to deployment loops depends on transfer beyond the benchmark improvements.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "training_optimization_comparison_without_human_label"
+    },
+    {
+      "paper_id": "2406.13352",
+      "title": "AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents",
+      "link": "https://arxiv.org/abs/2406.13352",
+      "abstract": "AgentDojo is an extensible environment for evaluating tool-using agents that encounter untrusted data. It combines realistic user tasks with security cases and supports new attacks and defenses. Its experiments examine both useful task execution and security properties under prompt injection. The environment exposes shortcomings in agents even without attacks as well as differences in attack effectiveness. This historical example is for scoring development only and is too old for the newsletter's current selection window.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "additional_governance_probe_not_named_in_prompt"
+    },
+    {
+      "paper_id": "2610.13870",
+      "title": "Ask Your Advisor: Learning When to Consult Stronger Models in Agentic Systems",
+      "link": "https://arxiv.org/abs/2610.13870",
+      "abstract": "ARIA learns when an agent executor should consult a stronger model. A compact policy uses execution evidence and consultation history, with action values learned from task outcomes and consultation cost. Experiments across software engineering, terminal tasks, and service interactions compare this approach with routing, cascading, and other consultation strategies. The reported policy improves the observed success-cost tradeoff without retraining the underlying models. Its focus is feedback-driven escalation rather than a demonstrated safety control.",
+      "abstract_kind": "source_summary",
+      "label": null,
+      "preferred_rank": null,
+      "primary_bucket": null,
+      "development_role": "additional_loop_probe_not_named_in_prompt"
+    }
+  ],
+  "summary_pairs": []
+}

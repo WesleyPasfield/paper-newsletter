@@ -761,10 +761,26 @@ class NewsletterPromptTests(unittest.TestCase):
         self.assertIn("recall-oriented", TITLE_EVAL_PROMPT)
         self.assertIn("Do not infer evidence quality", TITLE_EVAL_PROMPT)
 
-    def test_abstract_prompt_prioritizes_loop_engineering_and_is_structured(self):
-        self.assertIn("loop engineering (30%, highest priority)", ABSTRACT_EVAL_PROMPT)
-        self.assertIn("closed feedback systems", ABSTRACT_EVAL_PROMPT)
-        self.assertIn('"evidence_quality"', ABSTRACT_EVAL_PROMPT)
+    def test_editorial_prompts_share_governance_and_loop_priority(self):
+        for prompt in (TITLE_EVAL_PROMPT, ABSTRACT_EVAL_PROMPT):
+            self.assertIn("equal highest priority", prompt)
+            self.assertIn("application-layer governance and loop engineering", prompt)
+            self.assertIn("closed feedback systems", prompt)
+            self.assertIn("runtime adaptation", prompt)
+            self.assertIn("including negative results", prompt)
+            self.assertIn("benign tasks without an adversarial user", prompt)
+            self.assertIn("Model-provider safeguards are a secondary focus", prompt)
+
+    def test_abstract_rubric_keeps_topic_fit_separate_from_evidence(self):
+        self.assertIn('"primary_bucket": "agent_governance |', ABSTRACT_EVAL_PROMPT)
+        self.assertIn(
+            "Keep evidence_quality independent of editorial fit", ABSTRACT_EVAL_PROMPT
+        )
+        self.assertIn(
+            "Runtime reliability alone does not imply governance", ABSTRACT_EVAL_PROMPT
+        )
+        self.assertIn("X-AgentRed", ABSTRACT_EVAL_PROMPT)
+        self.assertIn("never automatic inclusion", ABSTRACT_EVAL_PROMPT)
 
     def test_newsletter_prompt_has_one_consistent_length_contract(self):
         self.assertIn("Overview: 2-3 sentences and 50-100 words", NEWSLETTER_PROMPT)

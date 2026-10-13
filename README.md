@@ -13,7 +13,7 @@ An AWS SAM application that finds recent AI research, ranks it against an editor
 
 - Reads eight first-party arXiv category feeds.
 - Screens titles for recall, scores abstracts with deterministic weights, and ranks the combined candidate pool.
-- Treats loop engineering, agent evaluation, and optimization as the highest editorial priority.
+- Gives application-layer agent governance and loop engineering equal highest priority, centered on safely deploying complex agents.
 - Produces grounded summaries and an issue overview with explicit output contracts.
 - Uses double opt-in verification and token-confirmed unsubscribe flows.
 - Keeps durable issue, recipient submission, and SES delivery state so a retry does not blindly resend.
@@ -62,6 +62,12 @@ Each healthy weekly run follows this invariant:
 4. Record partial feed or paper-evaluation failures as degraded metadata when enough valid candidates remain. Raise `IssueGenerationFailed` and send nothing when all feeds fail, a complete model stage fails, synthesis fails, or fewer than three valid papers remain. The system does not fabricate or send an empty issue.
 
 The defaults select at least three and up to seven featured papers, plus up to three additional papers. Title screening has a `0.35` recall floor. Abstract ranking uses `0.60` as the preferred relevance threshold, then the weekly fallback can choose the best valid candidates when fewer than three clear it. The score weights direct fit at 40%, evidence quality at 25%, production transferability at 20%, domain-expert relevance at 10%, and novelty at 5%.
+
+The editorial rubric gives safe agent deployment through application-layer governance and loop engineering 60% combined emphasis, with equal priority for both. Architecture has 20%, production reliability 15%, and transferable enterprise engineering 5%. These are prompt guidance, not selection quotas or arithmetic multipliers. Explicit `direct_fit` ranges put concrete agent governance and improvement loops in the same top band. Evidence and production transferability are assessed separately, so an appealing topic does not establish strong evidence.
+
+`agent_governance` covers controls and evaluations of agent authority, tool access, runtime policies, oversight, containment, and harmful interactions across services. Provider safeguards matter where they inform deployment safety. Broad policy and model safety without an application connection remain secondary. Summaries explain the relevant deployment lesson without inventing a governance connection or a defense.
+
+The curated development examples are in `tests/content_eval_governance_examples.json`. X-AgentRed is Wesley's positive anchor; other records remain unlabeled comparison cases. This small set is for rubric development, not a held-out benchmark or evidence of calibrated ranking accuracy. Archived issues record `editorial_rubric_version` so later audits can identify the rubric used. Previously archived issues remain immutable and continue to be excluded from selection.
 
 | Stage | Primary model | Reasoning | Purpose |
 | --- | --- | --- | --- |

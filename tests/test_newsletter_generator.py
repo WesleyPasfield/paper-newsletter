@@ -22,6 +22,24 @@ def publishable_issue() -> dict:
 
 
 class NewsletterValidationTests(unittest.TestCase):
+    @patch("functions.newsletter_generator.PaperAnalyzer")
+    def test_generated_issue_records_rubric_version(self, analyzer_class):
+        analyzer_class.return_value.process_multiple_feeds.return_value = json.dumps(
+            publishable_issue()
+        )
+        analyzer_class.return_value.candidate_pool_size = 80
+
+        issue = newsletter_generator._generate_issue("test-key", set())
+
+        self.assertEqual(
+            issue["metadata"]["editorial_rubric_version"],
+            newsletter_generator.EDITORIAL_RUBRIC_VERSION,
+        )
+        self.assertIn(
+            "agent_governance",
+            analyzer_class.call_args.kwargs["abstract_eval_prompt"],
+        )
+
     def test_configured_fallback_queries_recent_arxiv_submissions(self):
         url = newsletter_generator.configured_feed_fallback_url(80)
 
