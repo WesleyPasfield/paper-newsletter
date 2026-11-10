@@ -14,6 +14,7 @@ from functions.newsletter_generator import (
 )
 from functions.paper_analyzer import (
     FINAL_RELEVANCE_FLOOR,
+    OPENAI_REQUEST_TIMEOUT_SECONDS,
     AbstractEvaluation,
     CircuitState,
     Paper,
@@ -81,6 +82,20 @@ class PaperAnalyzerModelTests(unittest.TestCase):
         self.assertEqual(self.analyzer.openai_model_pricey, "gpt-5.6-luna")
         self.assertEqual(self.analyzer.openai_model_fallback, "gpt-5.6-sol")
         self.assertEqual(self.analyzer.openai_model_emergency, "gpt-5.5")
+
+    @patch("functions.paper_analyzer.OpenAI")
+    def test_client_timeout_and_sdk_retries_are_bounded(self, openai_client):
+        PaperAnalyzer(
+            openai_api_key="test-key",
+            eval_prompt="eval",
+            newsletter_prompt="newsletter",
+        )
+
+        openai_client.assert_called_once_with(
+            api_key="test-key",
+            timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
 
     @patch("functions.paper_analyzer.time.sleep")
     @patch("functions.paper_analyzer.random.uniform", return_value=1.0)
